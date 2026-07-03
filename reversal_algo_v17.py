@@ -395,6 +395,14 @@ def _is_push_candle_long(c, avg_vol):
         score += 1
         reasons.append("vol>1.5x")
 
+    # V/U bottom: floor absorption confirms reversal at absorbed level
+    if c.get("floor_abs", 0) > 0:
+        score += 2
+        reasons.append("floor_abs")
+    if c.get("multi_absorb", 0) >= 2:
+        score += 1
+        reasons.append(f"mul_abs={c.get('multi_absorb', 0)}")
+
     return score >= 2, score, reasons
 
 
@@ -618,93 +626,144 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         # === TRY LONG (standard double-push) ===
         is_push2_long, push2_score_l, push2_reasons_l = _is_push_candle_long(c, avg_vol)
-        if is_push2_long and push2_score_l >= 3:
+
+        # Floor absorption with DG structure lowers push threshold (V/U bottom)
+        # Push2 must show DG buying (dg>=2) confirming the reversal pattern
+        _floor_zone = range(max(0, i - 3), i + 1)
+        _has_floor_abs = any(candles[k].get("floor_abs", 0) > 0 for k in _floor_zone)
+        zone_has_floor = _has_floor_abs and c.get("local_dg", 0) >= 2
+        push2_threshold = 2 if zone_has_floor else 3
+
+        # Also allow entry when push2 has direct floor_abs with dg>=1 (cross-candle DG-L-DG)
+        # The V/U bottom must be established (low not still being made recently)
+        _recent_lows = [(k, candles[k]["low"]) for k in range(max(0, i - 6), i + 1)]
+        _min_low_idx = min(_recent_lows, key=lambda x: x[1])[0]
+        _low_age = i - _min_low_idx
+        _cross_candle_eligible = (c.get("floor_abs", 0) > 0 and c.get("local_dg", 0) >= 1
+                                  and _low_age >= 3
+                                  and is_push2_long and push2_score_l >= 2)
+        if is_push2_long and (push2_score_l >= push2_threshold or _cross_candle_eligible):
             atr = _compute_atr(candles, i)
 
-            for gap in range(1, 4):
-                p1_idx = i - gap
-                if p1_idx < 5:
-                    break
-                p1 = candles[p1_idx]
-
-                if p1["delta"] <= 0:
-                    continue
-                _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
-
-                between = candles[p1_idx + 1:i]
-                counter_push = any(x["delta"] < -15000 for x in between)
-                if counter_push:
-                    continue
-
-                initiative_score = push2_score_l + max(1, push1_score_l // 2)
-
-                abs_atr = _compute_atr(candles, p1_idx)
-                abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
-                if abs_score == 0:
-                    continue
-
-                total_score = initiative_score + abs_score
-                if total_score < min_score:
-                    continue
-
-                entry = _get_ref_price(c)
-                push_low = min(p1["low"], c["low"])
-                pre_push_low = candles[max(0, p1_idx - 1)]["low"]
-                stop = min(push_low, pre_push_low) - atr * 0.1
-                R = entry - stop
-
-                if R <= atr * 0.1 or R > atr * 2.5:
-                    continue
-
-                if R > atr * MAX_STOP_ATR:
-                    continue
-
-                current_vwap = vwap[i]
-                target = entry + R * TARGET_R
-
-                if current_vwap > entry and (current_vwap - entry) < R:
-                    continue
-
-                vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
-
-                if total_score >= 11:
-                    grade = "A+"
-                elif total_score >= 9:
-                    grade = "A"
-                elif total_score >= 7:
-                    grade = "B+"
+            # PEAK guard: LONG must be a reversal from support, not a breakout at the top
+            session_high = max(candles[k]["high"] for k in range(0, i))
+            if c["high"] >= session_high:
+                pass  # blocked: making new session high = buying breakout, not reversal
+            else:
+                # V/U reversal context: entry must be in the lower portion of session range
+                session_low = min(candles[k]["low"] for k in range(0, i + 1))
+                session_range = session_high - session_low
+                entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
+                if entry_depth < 0.15:
+                    pass  # too close to session high — not a V/U bottom reversal
                 else:
-                    grade = "B"
 
-                all_reasons = abs_reasons + push1_reasons_l + push2_reasons_l
+                    # gap=1 allowed for cross-candle DG-L-DG (L is within candle, not between)
+                    min_gap = 1 if _cross_candle_eligible else 2
+                    for gap in range(min_gap, 5):
+                        p1_idx = i - gap
+                        if p1_idx < 5:
+                            break
+                        p1 = candles[p1_idx]
 
-                # V17: No DOM filter for LONG (DOM doesn't predict LONG failures)
+                        if p1["delta"] <= 0:
+                            continue
+                        _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
 
-                signals.append({
-                    "side": "LONG",
-                    "candle_idx": i,
-                    "push1_idx": p1_idx,
-                    "time": c.get("time", ""),
-                    "entry": entry,
-                    "stop": stop,
-                    "target": target,
-                    "R": R,
-                    "score": total_score,
-                    "grade": grade,
-                    "initiative_score": initiative_score,
-                    "abs_score": abs_score,
-                    "push1_score": push1_score_l,
-                    "push2_score": push2_score_l,
-                    "reasons": all_reasons,
-                    "vwap": current_vwap,
-                    "vwap_support": vwap_support,
-                    "push_rvol": c.get("rvol", 1.0),
-                    "push_dg": c.get("local_dg", 0),
-                    "push_dr": 0,
-                    "push_delta": c["delta"],
-                    "signal_type": "double_push",
-                })
-                break
+                        between = candles[p1_idx + 1:i]
+                        counter_push = any(x["delta"] < -15000 for x in between)
+                        if counter_push:
+                            continue
+
+                        initiative_score = push2_score_l + max(1, push1_score_l // 2)
+
+                        abs_atr = _compute_atr(candles, p1_idx)
+                        abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
+
+                        # V/U bottom: floor absorption on recent candles is direct evidence
+                        zone = candles[max(0, p1_idx - 1):i + 1]
+                        zone_floor = sum(x.get("floor_abs", 0) for x in zone)
+                        zone_multi = max((x.get("multi_absorb", 0) for x in zone), default=0)
+                        if zone_floor > 0:
+                            floor_score = 3
+                            floor_reasons = [f"floor_zone={zone_floor/1000:.0f}K"]
+                            if zone_multi >= 2:
+                                floor_score += 1
+                                floor_reasons.append(f"multi={zone_multi}")
+                            if floor_score > abs_score:
+                                abs_score = floor_score
+                                abs_reasons = floor_reasons
+
+                        if abs_score == 0:
+                            continue
+
+                        total_score = initiative_score + abs_score
+                        # Floor-confirmed V/U bottom: lower threshold
+                        # Also allow cross-candle DG-L-DG: push1 has dg>=2, push2 has floor_abs
+                        is_floor_pattern = zone_has_floor
+                        if not is_floor_pattern and zone_floor > 0:
+                            if p1.get("local_dg", 0) >= 2 and c.get("floor_abs", 0) > 0:
+                                is_floor_pattern = True
+                        effective_min = 6 if is_floor_pattern else min_score
+                        if total_score < effective_min:
+                            continue
+
+                        entry = _get_ref_price(c)
+                        push_low = min(p1["low"], c["low"])
+                        pre_push_low = candles[max(0, p1_idx - 1)]["low"]
+                        stop = min(push_low, pre_push_low) - atr * 0.1
+                        R = entry - stop
+
+                        if R <= atr * 0.1 or R > atr * 2.5:
+                            continue
+
+                        if R > atr * MAX_STOP_ATR:
+                            continue
+
+                        current_vwap = vwap[i]
+                        target = entry + R * TARGET_R
+
+                        if current_vwap > entry and (current_vwap - entry) < R:
+                            continue
+
+                        vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
+
+                        if total_score >= 11:
+                            grade = "A+"
+                        elif total_score >= 9:
+                            grade = "A"
+                        elif total_score >= 7:
+                            grade = "B+"
+                        else:
+                            grade = "B"
+
+                        all_reasons = abs_reasons + push1_reasons_l + push2_reasons_l
+
+                        signals.append({
+                            "side": "LONG",
+                            "candle_idx": i,
+                            "push1_idx": p1_idx,
+                            "time": c.get("time", ""),
+                            "entry": entry,
+                            "stop": stop,
+                            "target": target,
+                            "R": R,
+                            "score": total_score,
+                            "grade": grade,
+                            "initiative_score": initiative_score,
+                            "abs_score": abs_score,
+                            "push1_score": push1_score_l,
+                            "push2_score": push2_score_l,
+                            "reasons": all_reasons,
+                            "vwap": current_vwap,
+                            "vwap_support": vwap_support,
+                            "push_rvol": c.get("rvol", 1.0),
+                            "push_dg": c.get("local_dg", 0),
+                            "push_dr": 0,
+                            "push_delta": c["delta"],
+                            "signal_type": "double_push",
+                        })
+                        break
 
         # === TRY SHORT (standard double-push) ===
         is_push2_short, push2_score_s, push2_reasons_s = _is_push_candle_short(c, avg_vol)
