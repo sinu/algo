@@ -716,6 +716,88 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                         })
                         break
 
+        # === TRY LONG (absorption-confirmed bounce) ===
+        # Narrow path: floor_abs on signal candle + NOT making new local low = bounce confirmed
+        if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
+            _has_floor = c.get("floor_abs", 0) > 0
+            if _has_floor and c["delta"] > 0:
+                _local_lows = [candles[k]["low"] for k in range(max(0, i - 6), i)]
+                _not_new_low = c["low"] > min(_local_lows) if _local_lows else False
+                if _not_new_low:
+                    atr = _compute_atr(candles, i)
+                    session_high = max(candles[k]["high"] for k in range(0, i))
+                    session_low = min(candles[k]["low"] for k in range(0, i + 1))
+                    session_range = session_high - session_low
+                    entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
+                    if c["high"] < session_high and entry_depth >= 0.30:
+                        for gap in range(1, 4):
+                            p1_idx = i - gap
+                            if p1_idx < 5:
+                                break
+                            p1 = candles[p1_idx]
+                            if p1["delta"] <= 0:
+                                continue
+
+                            abs_atr = _compute_atr(candles, p1_idx)
+                            abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
+                            if abs_score < 3:
+                                continue
+
+                            _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
+                            entry = _get_ref_price(c)
+                            push_low = min(p1["low"], c["low"])
+                            pre_push_low = candles[max(0, p1_idx - 1)]["low"]
+                            stop = min(push_low, pre_push_low) - atr * 0.1
+                            R = entry - stop
+
+                            if R <= atr * 0.1 or R > atr * 2.5:
+                                continue
+                            if R > atr * MAX_STOP_ATR:
+                                continue
+
+                            current_vwap = vwap[i]
+                            target = entry + R * TARGET_R
+
+                            if current_vwap > entry and (current_vwap - entry) < R:
+                                continue
+
+                            vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
+                            total_score = abs_score + 1 + max(1, push1_score_l // 2)
+
+                            if total_score >= 9:
+                                grade = "A"
+                            elif total_score >= 7:
+                                grade = "B+"
+                            else:
+                                grade = "B"
+
+                            all_reasons = abs_reasons + push1_reasons_l + ["floor_bounce"]
+                            signals.append({
+                                "side": "LONG",
+                                "candle_idx": i,
+                                "push1_idx": p1_idx,
+                                "time": c.get("time", ""),
+                                "entry": entry,
+                                "stop": stop,
+                                "target": target,
+                                "R": R,
+                                "score": total_score,
+                                "grade": grade,
+                                "initiative_score": 1 + max(1, push1_score_l // 2),
+                                "abs_score": abs_score,
+                                "push1_score": push1_score_l,
+                                "push2_score": 0,
+                                "reasons": all_reasons,
+                                "vwap": current_vwap,
+                                "vwap_support": vwap_support,
+                                "push_rvol": c.get("rvol", 1.0),
+                                "push_dg": c.get("local_dg", 0),
+                                "push_dr": 0,
+                                "push_delta": c["delta"],
+                                "signal_type": "floor_bounce",
+                            })
+                            break
+
         # === TRY SHORT (standard double-push) ===
         is_push2_short, push2_score_s, push2_reasons_s = _is_push_candle_short(c, avg_vol)
         if is_push2_short and push2_score_s >= 3:
