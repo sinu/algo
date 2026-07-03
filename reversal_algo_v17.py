@@ -616,6 +616,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
     avg_vol = feats["avg_vol"]
     vwap = feats["vwap"]
+    last_long_idx = -10
 
     for i in range(6, n if live_mode else n - 3):
         c = candles[i]
@@ -656,6 +657,8 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
                 if entry_depth < 0.15:
                     pass  # too close to session high — not a V/U bottom reversal
+                elif i - last_long_idx < 3:
+                    pass  # same reversal zone, already fired
                 else:
 
                     # gap=1 allowed for cross-candle DG-L-DG (L is within candle, not between)
@@ -763,6 +766,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             "push_delta": c["delta"],
                             "signal_type": "double_push",
                         })
+                        last_long_idx = i
                         break
 
         # === TRY SHORT (standard double-push) ===
