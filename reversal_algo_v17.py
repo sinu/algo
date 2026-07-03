@@ -395,14 +395,6 @@ def _is_push_candle_long(c, avg_vol):
         score += 1
         reasons.append("vol>1.5x")
 
-    # V/U bottom: floor absorption confirms reversal at absorbed level
-    if c.get("floor_abs", 0) > 0:
-        score += 2
-        reasons.append("floor_abs")
-    if c.get("multi_absorb", 0) >= 2:
-        score += 1
-        reasons.append(f"mul_abs={c.get('multi_absorb', 0)}")
-
     return score >= 2, score, reasons
 
 
@@ -616,7 +608,6 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
     avg_vol = feats["avg_vol"]
     vwap = feats["vwap"]
-    last_long_idx = -10
 
     for i in range(6, n if live_mode else n - 3):
         c = candles[i]
@@ -627,43 +618,22 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         # === TRY LONG (standard double-push) ===
         is_push2_long, push2_score_l, push2_reasons_l = _is_push_candle_long(c, avg_vol)
-
-        # Floor absorption with DG structure lowers push threshold (V/U bottom)
-        # Push2 must show DG buying (dg>=2) confirming the reversal pattern
-        _floor_zone = range(max(0, i - 3), i + 1)
-        _has_floor_abs = any(candles[k].get("floor_abs", 0) > 0 for k in _floor_zone)
-        zone_has_floor = _has_floor_abs and c.get("local_dg", 0) >= 2
-        push2_threshold = 2 if zone_has_floor else 3
-
-        # Also allow entry when push2 has direct floor_abs with dg>=1 (cross-candle DG-L-DG)
-        # The V/U bottom must be established (low not still being made recently)
-        _recent_lows = [(k, candles[k]["low"]) for k in range(max(0, i - 6), i + 1)]
-        _min_low_idx = min(_recent_lows, key=lambda x: x[1])[0]
-        _low_age = i - _min_low_idx
-        _cross_candle_eligible = (c.get("floor_abs", 0) > 0 and c.get("local_dg", 0) >= 1
-                                  and _low_age >= 3
-                                  and is_push2_long and push2_score_l >= 2)
-        if is_push2_long and (push2_score_l >= push2_threshold or _cross_candle_eligible):
+        if is_push2_long and push2_score_l >= 3:
             atr = _compute_atr(candles, i)
 
-            # PEAK guard: LONG must be a reversal from support, not a breakout at the top
+            # PEAK guard: block LONG when making new session high (breakout, not reversal)
             session_high = max(candles[k]["high"] for k in range(0, i))
             if c["high"] >= session_high:
-                pass  # blocked: making new session high = buying breakout, not reversal
+                pass
             else:
-                # V/U reversal context: entry must be in the lower portion of session range
                 session_low = min(candles[k]["low"] for k in range(0, i + 1))
                 session_range = session_high - session_low
                 entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
                 if entry_depth < 0.15:
-                    pass  # too close to session high — not a V/U bottom reversal
-                elif i - last_long_idx < 3:
-                    pass  # same reversal zone, already fired
+                    pass
                 else:
 
-                    # gap=1 allowed for cross-candle DG-L-DG (L is within candle, not between)
-                    min_gap = 1 if _cross_candle_eligible else 2
-                    for gap in range(min_gap, 5):
+                    for gap in range(1, 4):
                         p1_idx = i - gap
                         if p1_idx < 5:
                             break
@@ -682,33 +652,11 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
                         abs_atr = _compute_atr(candles, p1_idx)
                         abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
-
-                        # V/U bottom: floor absorption on recent candles is direct evidence
-                        zone = candles[max(0, p1_idx - 1):i + 1]
-                        zone_floor = sum(x.get("floor_abs", 0) for x in zone)
-                        zone_multi = max((x.get("multi_absorb", 0) for x in zone), default=0)
-                        if zone_floor > 0:
-                            floor_score = 3
-                            floor_reasons = [f"floor_zone={zone_floor/1000:.0f}K"]
-                            if zone_multi >= 2:
-                                floor_score += 1
-                                floor_reasons.append(f"multi={zone_multi}")
-                            if floor_score > abs_score:
-                                abs_score = floor_score
-                                abs_reasons = floor_reasons
-
                         if abs_score == 0:
                             continue
 
                         total_score = initiative_score + abs_score
-                        # Floor-confirmed V/U bottom: lower threshold
-                        # Also allow cross-candle DG-L-DG: push1 has dg>=2, push2 has floor_abs
-                        is_floor_pattern = zone_has_floor
-                        if not is_floor_pattern and zone_floor > 0:
-                            if p1.get("local_dg", 0) >= 2 and c.get("floor_abs", 0) > 0:
-                                is_floor_pattern = True
-                        effective_min = 6 if is_floor_pattern else min_score
-                        if total_score < effective_min:
+                        if total_score < min_score:
                             continue
 
                         entry = _get_ref_price(c)
@@ -766,7 +714,6 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             "push_delta": c["delta"],
                             "signal_type": "double_push",
                         })
-                        last_long_idx = i
                         break
 
         # === TRY SHORT (standard double-push) ===
