@@ -2408,10 +2408,12 @@ class FootprintRenderer:
             data_rows = complete_rows
         all_buy = [r['buy'] for r in data_rows]
         all_sell = [r['sell'] for r in data_rows]
+        candle_min_buy = min(all_buy) if all_buy else 0
         candle_max_buy = max(all_buy) if all_buy else 0
+        candle_min_sell = min(all_sell) if all_sell else 0
         candle_max_sell = max(all_sell) if all_sell else 0
-        green_denom = candle_max_sell
-        red_denom = candle_max_buy
+        green_denom = abs(candle_min_buy - candle_max_sell)
+        red_denom = abs(candle_max_buy - candle_min_sell)
 
         row_tags = [''] * len(complete_rows)
         row_colors = [None] * len(complete_rows)

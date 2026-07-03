@@ -2412,10 +2412,12 @@ class FootprintRenderer:
         data_rows = [r for r in complete_rows if r['buy'] > 0 or r['sell'] > 0]
         if not data_rows:
             data_rows = complete_rows  # fallback
+        candle_min_buy = min(r['buy'] for r in data_rows)
         candle_max_buy = max(r['buy'] for r in data_rows)
+        candle_min_sell = min(r['sell'] for r in data_rows)
         candle_max_sell = max(r['sell'] for r in data_rows)
-        green_denom = candle_max_sell
-        red_denom = candle_max_buy
+        green_denom = abs(candle_min_buy - candle_max_sell)
+        red_denom = abs(candle_max_buy - candle_min_sell)
         # 🔥 V5.85 DISPLAY-ONLY denominator: GoCharting normalizes each candle by its
         # single max |delta| (same scale for green & red) -> only the biggest imbalance
         # cell goes black, others scale proportionally. Not used for tagging/signals.

@@ -1,20 +1,21 @@
-"""Live V17 Direct — Cycle-based footprint polling + V17 signal detection.
+"""Live V18 Direct — Integrated footprint + V18 signal detection.
 
-Polls GoCharting every 5 minutes (aligned to candle close), fetches ALL
-candles for the day, renders only new ones through the footprint pipeline,
-and runs V17 signal detection. Stays alive indefinitely.
+Identical to live_v17_direct.py but drives reversal_algo_v18, which layers the
+node-volume high-conviction filter on top of V17.  It additionally computes the
+per-candle node volumes (trapped_ask_low / trapped_bid_high) the filter needs.
+
+The V17 live runner is left completely untouched.
 
 Usage:
-    python live_v17_direct.py              # Live mode (today)
-    python live_v17_direct.py 2026-07-01   # Specific date
+    python live_v18_direct.py                 # Live mode (today), node_vol>=10000
+    python live_v18_direct.py 2026-06-30      # Specific date
+    V18_MIN_NODE_VOL=5000 python live_v18_direct.py   # override threshold
+    V18_MIN_NODE_VOL=0 python live_v18_direct.py      # fall back to pure V17
 """
 import sys
 import os
 import threading
 import time
-import json
-import math
-import io
 
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -22,13 +23,17 @@ if sys.platform == 'win32':
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import io
 import statistics
-from datetime import datetime, timedelta
-from reversal_algo_v17 import compute_session_features, detect_signals
+from datetime import datetime
+from reversal_algo_v18 import compute_session_features, detect_signals, MIN_NODE_VOL as _DEFAULT_NODE_VOL
+
+# Node-volume threshold: env override, else V18 default (10000). 0 = pure V17.
+MIN_NODE_VOL = int(os.environ.get("V18_MIN_NODE_VOL", str(_DEFAULT_NODE_VOL)))
 
 
-class AlertFilter(io.TextIOBase):
-    """Suppresses footprint's '2B REVERSAL' alert lines from stdout."""
+class SignalFilter(io.TextIOBase):
+    """Filters out footprint's own '2B REVERSAL' alert lines from stdout."""
 
     def __init__(self, stream):
         self._stream = stream
@@ -55,8 +60,8 @@ class AlertFilter(io.TextIOBase):
         return self._stream.encoding
 
 
-class V17Runner:
-    """Accumulates candle dicts and runs V17 signal detection."""
+class V18Runner:
+    """Accumulates candle dicts and runs V18 signal detection."""
 
     def __init__(self):
         self.candles = []
@@ -64,7 +69,6 @@ class V17Runner:
         self.signals_fired = []
         self.active_trades = []
         self.last_signal_idx = -3
-        self.silent = False  # suppresses printing during initial batch load
 
     def on_candle(self, candle_dict):
         self.candles.append(candle_dict)
@@ -72,11 +76,12 @@ class V17Runner:
 
         self._update_active_trades()
 
-        if n < 7:
+        if n < 10:
             return
 
         feats = compute_session_features(self.candles)
-        signals = detect_signals(self.candles, feats, live_mode=True)
+        signals = detect_signals(self.candles, feats, live_mode=True,
+                                 min_node_vol=MIN_NODE_VOL)
 
         for sig in signals:
             idx = sig["candle_idx"]
@@ -92,9 +97,7 @@ class V17Runner:
                 "signal": sig, "entry_idx": n - 1,
                 "status": "ACTIVE", "bars_held": 0,
             })
-            if not self.silent:
-                self._print_signal(sig)
-
+            self._print_signal(sig)
 
     def _update_active_trades(self):
         if not self.active_trades or not self.candles:
@@ -110,61 +113,55 @@ class V17Runner:
                 if c["low"] <= sig["stop"]:
                     trade["status"] = "STOPPED"
                     trade["r_pnl"] = -1.0
-                    if not self.silent:
-                        self._print_exit(sig, "STOP HIT", -1.0)
+                    self._print_exit(sig, "STOP HIT", -1.0)
                 elif c["high"] >= sig["target"]:
                     trade["status"] = "TARGET"
                     trade["r_pnl"] = 1.2
-                    if not self.silent:
-                        self._print_exit(sig, "TARGET HIT", 1.2)
+                    self._print_exit(sig, "TARGET HIT", 1.2)
                 elif trade["bars_held"] >= 15:
                     r_pnl = (c["close"] - sig["entry"]) / sig["R"] if sig["R"] > 0 else 0
                     trade["status"] = "TIMEOUT"
                     trade["r_pnl"] = r_pnl
-                    if not self.silent:
-                        self._print_exit(sig, "TIMEOUT", r_pnl)
+                    self._print_exit(sig, "TIMEOUT", r_pnl)
             else:
                 if c["high"] >= sig["stop"]:
                     trade["status"] = "STOPPED"
                     trade["r_pnl"] = -1.0
-                    if not self.silent:
-                        self._print_exit(sig, "STOP HIT", -1.0)
+                    self._print_exit(sig, "STOP HIT", -1.0)
                 elif c["low"] <= sig["target"]:
                     trade["status"] = "TARGET"
                     trade["r_pnl"] = 1.2
-                    if not self.silent:
-                        self._print_exit(sig, "TARGET HIT", 1.2)
+                    self._print_exit(sig, "TARGET HIT", 1.2)
                 elif trade["bars_held"] >= 15:
                     r_pnl = (sig["entry"] - c["close"]) / sig["R"] if sig["R"] > 0 else 0
                     trade["status"] = "TIMEOUT"
                     trade["r_pnl"] = r_pnl
-                    if not self.silent:
-                        self._print_exit(sig, "TIMEOUT", r_pnl)
+                    self._print_exit(sig, "TIMEOUT", r_pnl)
 
     def _print_signal(self, sig):
         sig_type = "CASCADE" if sig.get("signal_type") == "cascade" else "DOUBLE-PUSH"
         print("\n" + "=" * 70)
-        print(f"  >>> V17 SIGNAL: {sig['side']} at {sig['time']} [{sig_type}] <<<")
+        print(f"  >>> V18 SIGNAL: {sig['side']} at {sig['time']} [{sig_type}] <<<")
         print(f"  Grade: {sig['grade']} | Score: {sig['score']}")
         print(f"  Entry: {sig['entry']:.2f}")
         print(f"  Stop:  {sig['stop']:.2f}")
         print(f"  Target: {sig['target']:.2f}")
         print(f"  R: {sig['R']:.1f} pts")
+        if 'node_vol' in sig:
+            print(f"  Node vol: {sig['node_vol']:.0f} (>= {MIN_NODE_VOL})")
         if 'abs_score' in sig:
             print(f"  Absorption: {sig['abs_score']} | Push1: {sig['push1_score']} | Push2: {sig['push2_score']}")
         print(f"  Reasons: {', '.join(sig.get('reasons', [])[:6])}")
         print("=" * 70 + "\n")
-        sys.stdout.flush()
 
     def _print_exit(self, sig, reason, r_pnl):
         color = "\033[92m" if r_pnl > 0 else "\033[91m"
         reset = "\033[0m"
         print(f"\n  {color}>>> {sig['side']} {sig['time']} -> {reason} ({r_pnl:+.2f}R){reset}")
-        sys.stdout.flush()
 
     def print_summary(self):
         print("\n" + "=" * 70)
-        print(f"  V17 SESSION SUMMARY")
+        print(f"  V18 SESSION SUMMARY")
         print(f"  Candles processed: {len(self.candles)}")
         print(f"  Signals fired: {len(self.signals_fired)}")
         if self.signals_fired:
@@ -188,28 +185,18 @@ class V17Runner:
         print("=" * 70)
 
 
-v17_runner = V17Runner()
-
-
-def get_seconds_to_next_bar():
-    """Seconds until next 5-min candle closes (+ 5s buffer for server)."""
-    now = datetime.now()
-    remainder = now.minute % 5
-    wait_minutes = 5 - remainder - 1
-    wait_seconds = 60 - now.second
-    total = (wait_minutes * 60) + wait_seconds + 5
-    if total <= 0:
-        total = 5
-    return total
+v18_runner = V18Runner()
 
 
 def main():
+    # Determine target date
     if len(sys.argv) > 1:
         target_date = sys.argv[1]
     else:
         target_date = datetime.now().strftime('%Y-%m-%d')
 
-    # Load footprint module
+    # Footprint reads sys.argv[1] at import time for FOOTPRINT_DATE
+    # Ensure it picks up our target date
     orig_argv = sys.argv[:]
     sys.argv = [sys.argv[0], target_date]
 
@@ -224,46 +211,37 @@ def main():
 
     sys.argv = orig_argv
 
-    # Suppress footprint's telegram and input
-    fp.send_telegram = lambda msg: None
-    import builtins
-    builtins.input = lambda *a, **kw: None
+    # Patch render_candle to feed V18
+    original_render = fp.FootprintRenderer.render_candle
 
-    # State persisted across cycles
-    rendered_timestamps = set()
-    renderer = None
+    def patched_render(self, candle, prev_candle=None):
+        original_render(self, candle, prev_candle)
 
-    def create_renderer(token):
-        nonlocal renderer
-        renderer = fp.FootprintRenderer(token)
-        return renderer
-
-    def extract_candle_data(renderer_inst, candle):
-        """Extract V17 candle dict from a rendered footprint candle."""
-        if not renderer_inst.ohlc_cache:
-            return None
-        last_ohlc = renderer_inst.ohlc_cache[-1]
+        # Extract data and feed V18
+        if not self.ohlc_cache:
+            return
+        last_ohlc = self.ohlc_cache[-1]
         o, h, l, c = last_ohlc['o'], last_ohlc['h'], last_ohlc['l'], last_ohlc['c']
         if h == 0 and l == 0:
-            return None
+            return
 
         try:
             dt_utc = datetime.fromisoformat(candle.date.replace('Z', '+00:00'))
             dt_ist = dt_utc + fp.IST_OFFSET
             time_str = dt_ist.strftime('%H:%M:%S')
         except:
-            return None
+            return
 
-        vol = renderer_inst.volume_history[-1] if renderer_inst.volume_history else 0
-        delta = renderer_inst.delta_history[-1] if renderer_inst.delta_history else 0
-        avg_vol = sum(renderer_inst.volume_history) / len(renderer_inst.volume_history) if renderer_inst.volume_history else 1
+        vol = self.volume_history[-1] if self.volume_history else 0
+        delta = self.delta_history[-1] if self.delta_history else 0
+        avg_vol = sum(self.volume_history) / len(self.volume_history) if self.volume_history else 1
         rvol = vol / avg_vol if avg_vol > 0 else 1.0
 
         levels = []
         if hasattr(candle, 'footprint'):
             agg = {}
             for row in candle.footprint:
-                bucket_price = renderer_inst.get_bucket(row.level)
+                bucket_price = self.get_bucket(row.level)
                 key = f"{bucket_price:.2f}"
                 if key not in agg:
                     agg[key] = {'price': bucket_price, 'bid': 0, 'ask': 0}
@@ -296,6 +274,18 @@ def main():
                     large_bid_count += 1
                 if ask_v > avg_level_vol * 3:
                     large_ask_count += 1
+
+        # Node volume absorbed at the reversal extremes (matches validate_v5_full.parse_day)
+        # trapped_ask_low  = buy (ask) volume in the bottom 20% of the candle range
+        # trapped_bid_high = sell (bid) volume in the top 20% of the candle range
+        candle_range = (h - l) if h > l else 1.0
+        trapped_ask_low = 0.0
+        trapped_bid_high = 0.0
+        for price_lv, bid_v, ask_v in levels:
+            if price_lv <= l + candle_range * 0.2:
+                trapped_ask_low += ask_v
+            if price_lv >= h - candle_range * 0.2:
+                trapped_bid_high += bid_v
 
         local_dg = 0
         local_dr = 0
@@ -331,17 +321,18 @@ def main():
                 elif lu <= 125 and row_delta < 0:
                     local_dr += 1
 
-        floor_abs = getattr(renderer_inst, 'bottom_absorb_cumul', 0) if getattr(renderer_inst, 'bottom_absorb_streak', 0) >= 2 else 0
-        ceil_abs = getattr(renderer_inst, 'bear_top_absorb_cumul', 0) if getattr(renderer_inst, 'bear_top_absorb_streak', 0) >= 2 else 0
+        floor_abs = getattr(self, 'bottom_absorb_cumul', 0) if getattr(self, 'bottom_absorb_streak', 0) >= 2 else 0
+        ceil_abs = getattr(self, 'bear_top_absorb_cumul', 0) if getattr(self, 'bear_top_absorb_streak', 0) >= 2 else 0
         multi_absorb = 0
-        if hasattr(renderer_inst, 'absorption_zones'):
-            multi_absorb = sum(1 for z in renderer_inst.absorption_zones.values()
+        if hasattr(self, 'absorption_zones'):
+            multi_absorb = sum(1 for z in self.absorption_zones.values()
                                if z['count'] >= 2)
         body = abs(c - o)
         spread = h - l
-        if len(renderer_inst.volume_history) >= 10:
-            _mean = statistics.mean(renderer_inst.volume_history)
-            _stdev = statistics.stdev(renderer_inst.volume_history)
+        # Churn uses z-score (not ratio) with body_ratio < 0.4, matching footprint
+        if len(self.volume_history) >= 10:
+            _mean = statistics.mean(self.volume_history)
+            _stdev = statistics.stdev(self.volume_history)
             _zscore = (vol - _mean) / _stdev if _stdev > 0 else 0
         else:
             _zscore = 0
@@ -351,7 +342,7 @@ def main():
         if levels:
             poc = max(levels, key=lambda x: x[1] + x[2])[0]
 
-        return {
+        v18_runner.on_candle({
             "time": time_str,
             "open": o, "high": h, "low": l, "close": c,
             "volume": vol, "delta": delta, "rvol": rvol, "poc": poc,
@@ -361,159 +352,57 @@ def main():
             "bid_dom_levels": bid_dom_levels, "ask_dom_levels": ask_dom_levels,
             "book_pressure_ratio": book_pressure_ratio,
             "large_bid_count": large_bid_count, "large_ask_count": large_ask_count,
-        }
+            "trapped_ask_low": trapped_ask_low, "trapped_bid_high": trapped_bid_high,
+        })
 
-    def run_cycle(token):
-        """One polling cycle: fetch candles, render new ones, run V17."""
-        nonlocal renderer, rendered_timestamps
+    fp.FootprintRenderer.render_candle = patched_render
 
-        # Reset OHLC for fresh data
-        fp.ohlc_data.clear()
-        fp.ohlc_complete = False
+    # Suppress footprint's telegram alerts, input() prompt, and 2B REVERSAL print output
+    fp.send_telegram = lambda msg: None
+    import builtins
+    _original_input = builtins.input
+    builtins.input = lambda *a, **kw: None
+    sys.stdout = SignalFilter(sys.stdout)
 
-        # Fetch fresh OHLC
-        ohlc_thread = threading.Thread(target=lambda: fp.OHLCFetcher(token).start())
-        ohlc_thread.daemon = True
-        ohlc_thread.start()
-        ohlc_thread.join(timeout=10)
-
-        if not fp.ohlc_complete:
-            print("  OHLC timeout - skipping cycle")
-            return
-
-        # Create renderer on first cycle (persists across cycles for state)
-        if renderer is None:
-            create_renderer(token)
-
-        # Fetch footprint candles
-        candles_received = []
-        fetch_done = threading.Event()
-
-        def on_msg(ws, message):
-            if isinstance(message, str):
-                if "Welcome" in message:
-                    req = {"command": "FOOTPRINT/V2", "request_id": 1,
-                           "payload": {"exchange": "NSE", "segment": "FUTURE",
-                                       "symbol": "NIFTY-I", "interval": "5m",
-                                       "dates": [renderer.curr_date], "session": "RTH"}}
-                    ws.send(json.dumps(req))
-                return
-            if b'~b' in message:
-                try:
-                    raw = message[message.find(b'~b') + 2:]
-                    resp = fp.footprint_pb2.FootPrintForDateResponse()
-                    resp.ParseFromString(raw)
-                    if resp.candles:
-                        candles_received.extend(resp.candles)
-                except Exception as e:
-                    print(f"  Parse error: {e}")
-                fetch_done.set()
-                try:
-                    ws.close()
-                except:
-                    pass
-
-        import websocket as _ws_mod
-        ws_app = _ws_mod.WebSocketApp(
-            renderer.ws_url,
-            header=renderer.headers,
-            on_open=lambda ws: None,
-            on_message=on_msg,
-            on_error=lambda ws, e: fetch_done.set(),
-            on_close=lambda ws, code, msg: fetch_done.set(),
-        )
-        ws_thread = threading.Thread(target=lambda: ws_app.run_forever(ping_timeout=10))
-        ws_thread.daemon = True
-        ws_thread.start()
-        fetch_done.wait(timeout=15)
-        try:
-            ws_app.close()
-        except:
-            pass
-
-        if not candles_received:
-            print("  No candles received")
-            return
-
-        # Sort and render only NEW CLOSED candles (skip in-progress last bar)
-        all_sorted = sorted(candles_received, key=lambda c: c.date)
-        # Drop the last candle if it might still be forming
-        if all_sorted:
-            try:
-                last_dt = datetime.fromisoformat(all_sorted[-1].date.replace('Z', '+00:00'))
-                now_utc = datetime.now(last_dt.tzinfo) if last_dt.tzinfo else datetime.utcnow()
-                if (now_utc - last_dt).total_seconds() < 300:
-                    all_sorted = all_sorted[:-1]
-            except:
-                pass
-
-        new_count = 0
-        for c in all_sorted:
-            if c.date not in rendered_timestamps:
-                rendered_timestamps.add(c.date)
-                renderer.render_candle(c)
-                candle_data = extract_candle_data(renderer, c)
-                if candle_data:
-                    v17_runner.on_candle(candle_data)
-                    new_count += 1
-
-        if new_count > 0:
-            n = len(v17_runner.candles)
-            last_t = v17_runner.candles[-1]["time"] if v17_runner.candles else "?"
-            active = sum(1 for t in v17_runner.active_trades if t['status'] == 'ACTIVE')
-            print(f"  [{last_t}] +{new_count} new | {n} total | "
-                  f"{len(v17_runner.signals_fired)} signals | active: {active}")
-            sys.stdout.flush()
-
-    # === MAIN LOOP ===
+    # Print V18 header
     print("=" * 70)
-    print(f"  V17 LIVE MODE - {target_date}")
-    print(f"  Cycle-based polling (aligned to 5-min candle close)")
+    print(f"  V18 DIRECT MODE - {target_date}")
+    print(f"  Footprint + V18 integrated (no subprocess)")
     print(f"  Signals: Double-Push (LONG/SHORT) + Cascade (SHORT)")
-    print(f"  Filters: SHORT DOM (cumulative 3-bar net)")
+    print(f"  Filters: SHORT DOM (cumulative 3-bar net)"
+          + (f" | node_vol>={MIN_NODE_VOL}" if MIN_NODE_VOL > 0 else " | node_vol OFF (pure V17)"))
     print("=" * 70)
 
+    # Run footprint (it handles token, OHLC, websocket)
     token = fp.get_fresh_token()
     if not token:
         print("CRITICAL: Failed to get token")
         sys.exit(1)
 
-    # Install filter to suppress footprint's own '2B REVERSAL' alerts
-    sys.stdout = AlertFilter(sys.stdout)
+    print("Step 1: Fetching Official OHLC...")
+    ohlc_thread = threading.Thread(target=lambda: fp.OHLCFetcher(token).start())
+    ohlc_thread.daemon = True
+    ohlc_thread.start()
 
-    # First cycle — silent mode only for live (today), print signals for backtest dates
-    is_live = (target_date == datetime.now().strftime('%Y-%m-%d'))
-    if is_live:
-        v17_runner.silent = True
-    print("  Running initial cycle...")
-    run_cycle(token)
-    v17_runner.silent = False
-    n = len(v17_runner.candles)
-    past_sigs = len(v17_runner.signals_fired)
-    print(f"  Loaded {n} candles ({past_sigs} past signals)." +
-          (" Entering live loop.\n" if is_live else "\n"))
-    sys.stdout.flush()
+    wait_time = 0
+    while not fp.ohlc_complete and wait_time < 30:
+        time.sleep(1)
+        wait_time += 1
 
-    try:
-        while True:
-            wait_sec = get_seconds_to_next_bar()
-            next_time = (datetime.now() + timedelta(seconds=wait_sec)).strftime('%H:%M:%S')
-            print(f"  Next poll at {next_time} ({wait_sec}s)...")
-            sys.stdout.flush()
-            time.sleep(wait_sec)
+    if fp.ohlc_complete:
+        print("Step 2: Starting Footprint + V18 Analysis...")
+        try:
+            fp.FootprintRenderer(token).start()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+    else:
+        print("ERROR: OHLC download timed out.")
 
-            # Refresh token every cycle (it may expire)
-            token = fp.get_fresh_token()
-            if not token:
-                print("  Token refresh failed, retrying in 30s...")
-                time.sleep(30)
-                continue
-
-            run_cycle(token)
-    except KeyboardInterrupt:
-        pass
-
-    v17_runner.print_summary()
+    # Restore stdout/input and print V18 summary
+    if isinstance(sys.stdout, SignalFilter):
+        sys.stdout = sys.stdout._stream
+    builtins.input = _original_input
+    v18_runner.print_summary()
 
 
 if __name__ == "__main__":
