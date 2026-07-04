@@ -803,20 +803,20 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         # === TRY LONG (VWAP pullback) ===
         # Price established above VWAP, pulled back to VWAP support, buyers stepped in
+        # Requires DG-L-DG: recent DG (buyer presence) -> L (pullback) -> DG (bounce)
         if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
             if c["delta"] > 0 and c.get("local_dg", 0) >= 2 and c["close"] > vwap[i]:
-                # Candle low must touch VWAP (within 0.5*ATR)
                 _atr_vp = _compute_atr(candles, i)
                 _low_near_vwap = c["low"] <= vwap[i] + _atr_vp * 0.3
-                # Price must have been above VWAP (trend established)
                 _bars_above = sum(1 for k in range(max(0, i - 8), i)
                                   if candles[k]["close"] > vwap[k])
-                if _low_near_vwap and _bars_above >= 5:
-                    # Must not be at session high or new local high
+                # DG-L-DG: must have DG>=2 within 4 bars before signal (first DG of pattern)
+                _has_prior_dg = any(candles[k].get("local_dg", 0) >= 2
+                                    for k in range(max(0, i - 4), i))
+                if _low_near_vwap and _bars_above >= 5 and _has_prior_dg:
                     _sh = max(candles[k]["high"] for k in range(0, i))
                     _local_h = max(candles[k]["high"] for k in range(max(0, i - 6), i))
                     if c["high"] < _sh and c["high"] < _local_h:
-                        # Need absorption at VWAP level
                         _best_abs = 0
                         _best_abs_reasons = []
                         for _chk in range(max(0, i - 3), i + 1):
