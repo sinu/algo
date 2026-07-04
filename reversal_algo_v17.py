@@ -631,6 +631,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
                 if entry_depth < 0.15:
                     pass
+                # Block when making new local high (buying into rally, not reversal from support)
+                elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
+                    pass
                 else:
 
                     for gap in range(1, 4):
