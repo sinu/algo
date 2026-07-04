@@ -632,9 +632,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 if entry_depth < 0.15:
                     pass
                 # Block when making new local high (buying into rally, not reversal from support)
-                # Exception: VWAP support bounce (low dips to/below VWAP, close recovers above)
-                elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)) \
-                        and not (c["low"] <= vwap[i] and c["close"] > vwap[i]):
+                elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
                     pass
                 else:
 
@@ -669,12 +667,6 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                         pre_push_low = candles[max(0, p1_idx - 1)]["low"]
                         stop = min(push_low, pre_push_low) - atr * 0.1
                         R = entry - stop
-
-                        # VWAP bounce: use signal candle low as stop (V-bottom at VWAP)
-                        _is_vwap_bounce = c["low"] <= vwap[i] and c["close"] > vwap[i]
-                        if R > atr * MAX_STOP_ATR and _is_vwap_bounce:
-                            stop = c["low"] - atr * 0.1
-                            R = entry - stop
 
                         if R <= atr * 0.1 or R > atr * 2.5:
                             continue
@@ -808,6 +800,65 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                 "signal_type": "floor_bounce",
                             })
                             break
+
+        # === TRY LONG (VWAP pullback) ===
+        # Price established above VWAP, pulled back to VWAP support, buyers stepped in
+        if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
+            if c["delta"] > 0 and c.get("local_dg", 0) >= 2 and c["close"] > vwap[i]:
+                # Candle low must touch VWAP (within 0.5*ATR)
+                _atr_vp = _compute_atr(candles, i)
+                _low_near_vwap = c["low"] <= vwap[i] + _atr_vp * 0.3
+                # Price must have been above VWAP (trend established)
+                _bars_above = sum(1 for k in range(max(0, i - 8), i)
+                                  if candles[k]["close"] > vwap[k])
+                if _low_near_vwap and _bars_above >= 5:
+                    # Must not be at session high or new local high
+                    _sh = max(candles[k]["high"] for k in range(0, i))
+                    _local_h = max(candles[k]["high"] for k in range(max(0, i - 6), i))
+                    if c["high"] < _sh and c["high"] < _local_h:
+                        # Need absorption at VWAP level
+                        _best_abs = 0
+                        _best_abs_reasons = []
+                        for _chk in range(max(0, i - 3), i + 1):
+                            _a, _ar = _detect_seller_absorption(candles, _chk, _atr_vp)
+                            if _a > _best_abs:
+                                _best_abs = _a
+                                _best_abs_reasons = _ar
+                        if _best_abs >= 3:
+                            _entry = _get_ref_price(c)
+                            _recent_low = min(candles[k]["low"] for k in range(max(0, i - 3), i + 1))
+                            _stop = _recent_low - _atr_vp * 0.1
+                            _R = _entry - _stop
+                            if _R > _atr_vp * 0.15 and _R <= _atr_vp * MAX_STOP_ATR:
+                                _target = _entry + _R * TARGET_R
+                                _vwap_support = True
+                                _total = _best_abs + 2 + c.get("local_dg", 0)
+                                _grade = "A" if _total >= 9 else "B+" if _total >= 7 else "B"
+                                _all_reasons = _best_abs_reasons + [f"dg={c.get('local_dg',0)}", "vwap_pullback"]
+                                signals.append({
+                                    "side": "LONG",
+                                    "candle_idx": i,
+                                    "push1_idx": i - 1,
+                                    "time": c.get("time", ""),
+                                    "entry": _entry,
+                                    "stop": _stop,
+                                    "target": _target,
+                                    "R": _R,
+                                    "score": _total,
+                                    "grade": _grade,
+                                    "initiative_score": 2 + c.get("local_dg", 0),
+                                    "abs_score": _best_abs,
+                                    "push1_score": 0,
+                                    "push2_score": c.get("local_dg", 0),
+                                    "reasons": _all_reasons,
+                                    "vwap": vwap[i],
+                                    "vwap_support": _vwap_support,
+                                    "push_rvol": c.get("rvol", 1.0),
+                                    "push_dg": c.get("local_dg", 0),
+                                    "push_dr": 0,
+                                    "push_delta": c["delta"],
+                                    "signal_type": "vwap_pullback",
+                                })
 
         # === TRY SHORT (standard double-push) ===
         is_push2_short, push2_score_s, push2_reasons_s = _is_push_candle_short(c, avg_vol)
