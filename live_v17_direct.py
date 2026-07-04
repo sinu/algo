@@ -117,7 +117,7 @@ class V17Runner:
                     trade["r_pnl"] = 1.2
                     if not self.silent:
                         self._print_exit(sig, "TARGET HIT", 1.2)
-                elif trade["bars_held"] >= 15:
+                elif trade["bars_held"] >= (25 if sig.get("signal_type") == "vwap_pullback" else 15):
                     r_pnl = (c["close"] - sig["entry"]) / sig["R"] if sig["R"] > 0 else 0
                     trade["status"] = "TIMEOUT"
                     trade["r_pnl"] = r_pnl
@@ -134,7 +134,7 @@ class V17Runner:
                     trade["r_pnl"] = 1.2
                     if not self.silent:
                         self._print_exit(sig, "TARGET HIT", 1.2)
-                elif trade["bars_held"] >= 15:
+                elif trade["bars_held"] >= (25 if sig.get("signal_type") == "vwap_pullback" else 15):
                     r_pnl = (sig["entry"] - c["close"]) / sig["R"] if sig["R"] > 0 else 0
                     trade["status"] = "TIMEOUT"
                     trade["r_pnl"] = r_pnl
