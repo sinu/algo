@@ -910,6 +910,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             if is_cascade_s:
                 atr = _compute_atr(candles, i)
 
+                # Cascade must be near resistance (upper portion of range), not chasing a crash
+                _s_high = max(candles[k]["high"] for k in range(0, i))
+                _s_low = min(candles[k]["low"] for k in range(0, i + 1))
+                _s_range = _s_high - _s_low
+                _entry_height = (c["close"] - _s_low) / _s_range if _s_range > 0 else 0.5
+                if _entry_height < 0.35:
+                    continue
+
                 # For cascade: override trend filter if absorption >= 4
                 trend_blocked = _check_short_trend_filter(candles, i, atr)
 
