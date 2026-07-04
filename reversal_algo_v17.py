@@ -803,15 +803,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         # === TRY LONG (VWAP pullback) ===
         # Price broke above VWAP, rallied, pulled back to VWAP, DG-L-DG at VWAP support
+        # Signal candle must have dg>=3 (intra-candle DG-L-DG structure confirmed)
         if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
-            if c["delta"] > 0 and c.get("local_dg", 0) >= 2 and c["close"] > vwap[i]:
+            if c["delta"] > 0 and c.get("local_dg", 0) >= 3 and c["close"] > vwap[i]:
                 _atr_vp = _compute_atr(candles, i)
                 _low_near_vwap = c["low"] <= vwap[i] + _atr_vp * 0.3
                 _bars_above = sum(1 for k in range(max(0, i - 8), i)
                                   if candles[k]["close"] > vwap[k])
-                _has_prior_dg = any(candles[k].get("local_dg", 0) >= 2
-                                    for k in range(max(0, i - 4), i))
-                if _low_near_vwap and _bars_above >= 5 and _has_prior_dg:
+                if _low_near_vwap and _bars_above >= 5:
                     _sh = max(candles[k]["high"] for k in range(0, i))
                     _local_h = max(candles[k]["high"] for k in range(max(0, i - 6), i))
                     if c["high"] < _sh and c["high"] < _local_h:
