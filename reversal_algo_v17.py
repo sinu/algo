@@ -632,7 +632,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 if entry_depth < 0.15:
                     pass
                 # Block when making new local high (buying into rally, not reversal from support)
-                elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
+                # Exception: VWAP support bounce (low dips to/below VWAP, close recovers above)
+                elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)) \
+                        and not (c["low"] <= vwap[i] and c["close"] > vwap[i]):
                     pass
                 else:
 
@@ -667,6 +669,12 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                         pre_push_low = candles[max(0, p1_idx - 1)]["low"]
                         stop = min(push_low, pre_push_low) - atr * 0.1
                         R = entry - stop
+
+                        # VWAP bounce: use signal candle low as stop (V-bottom at VWAP)
+                        _is_vwap_bounce = c["low"] <= vwap[i] and c["close"] > vwap[i]
+                        if R > atr * MAX_STOP_ATR and _is_vwap_bounce:
+                            stop = c["low"] - atr * 0.1
+                            R = entry - stop
 
                         if R <= atr * 0.1 or R > atr * 2.5:
                             continue
