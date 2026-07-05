@@ -142,7 +142,11 @@ class V17Runner:
                         self._print_exit(sig, "TIMEOUT", r_pnl)
 
     def _print_signal(self, sig):
-        sig_type = "CASCADE" if sig.get("signal_type") == "cascade" else "DOUBLE-PUSH"
+        _st = sig.get("signal_type", "")
+        sig_type = {"cascade": "CASCADE", "failed_breakout": "FAILED-BRK",
+                    "ceiling_rejection": "CEIL-REJ", "floor_bounce": "FLOOR-BNC",
+                    "vwap_pullback": "VWAP-PB", "iceberg_squeeze": "ICE-SQZ",
+                    "dom_sweep_breakout": "DOM-SWP"}.get(_st, "DOUBLE-PUSH")
         print("\n" + "=" * 70)
         print(f"  >>> V17 SIGNAL: {sig['side']} at {sig['time']} [{sig_type}] <<<")
         print(f"  Grade: {sig['grade']} | Score: {sig['score']}")
@@ -174,7 +178,9 @@ class V17Runner:
             print(f"  LONG: {longs} | SHORT: {shorts} (Cascade: {cascades})")
             print(f"\n  All signals:")
             for sig in self.signals_fired:
-                sig_type = "C" if sig.get("signal_type") == "cascade" else "DP"
+                sig_type = {"cascade": "C", "failed_breakout": "FB", "ceiling_rejection": "CR",
+                            "floor_bounce": "FB", "vwap_pullback": "VP", "iceberg_squeeze": "IS",
+                            "dom_sweep_breakout": "DS"}.get(sig.get("signal_type", ""), "DP")
                 print(f"    {sig['time']} {sig['side']:5s} {sig['grade']} "
                       f"Score={sig['score']:2d} Entry={sig['entry']:.2f} "
                       f"Stop={sig['stop']:.2f} Tgt={sig['target']:.2f} [{sig_type}]")
@@ -299,6 +305,8 @@ def main():
 
         local_dg = 0
         local_dr = 0
+        has_dg_l_dg = False
+        has_dr_l_dr = False
         data_rows = [(p, b, a) for p, b, a in levels if b > 0 or a > 0]
         if data_rows:
             all_buy = [a for _, _, a in data_rows]
@@ -309,6 +317,7 @@ def main():
             candle_max_sell = max(all_sell)
             green_denom = abs(candle_min_buy - candle_max_sell)
             red_denom = abs(candle_max_buy - candle_min_sell)
+            level_tags = []
             for price_lv, bid_v, ask_v in data_rows:
                 row_delta = ask_v - bid_v
                 abs_d = abs(row_delta)
@@ -328,8 +337,40 @@ def main():
                 lu = 0.299 * rr + 0.587 * rg + 0.114 * rb
                 if lu <= 125 and row_delta > 0:
                     local_dg += 1
+                    level_tags.append("DG")
                 elif lu <= 125 and row_delta < 0:
                     local_dr += 1
+                    level_tags.append("DR")
+                else:
+                    level_tags.append("L")
+            if local_dg >= 2:
+                found_first_dg = False
+                found_gap = False
+                for tag in level_tags:
+                    if not found_first_dg:
+                        if tag == "DG":
+                            found_first_dg = True
+                    elif not found_gap:
+                        if tag != "DG":
+                            found_gap = True
+                    else:
+                        if tag == "DG":
+                            has_dg_l_dg = True
+                            break
+            if local_dr >= 2:
+                found_first_dr = False
+                found_gap = False
+                for tag in level_tags:
+                    if not found_first_dr:
+                        if tag == "DR":
+                            found_first_dr = True
+                    elif not found_gap:
+                        if tag != "DR":
+                            found_gap = True
+                    else:
+                        if tag == "DR":
+                            has_dr_l_dr = True
+                            break
 
         floor_abs = getattr(renderer_inst, 'bottom_absorb_cumul', 0) if getattr(renderer_inst, 'bottom_absorb_streak', 0) >= 2 else 0
         ceil_abs = getattr(renderer_inst, 'bear_top_absorb_cumul', 0) if getattr(renderer_inst, 'bear_top_absorb_streak', 0) >= 2 else 0
@@ -356,6 +397,7 @@ def main():
             "open": o, "high": h, "low": l, "close": c,
             "volume": vol, "delta": delta, "rvol": rvol, "poc": poc,
             "local_dg": local_dg, "local_dr": local_dr,
+            "has_dg_l_dg": has_dg_l_dg, "has_dr_l_dr": has_dr_l_dr,
             "floor_abs": floor_abs, "ceil_abs": ceil_abs,
             "is_churn": is_churn, "multi_absorb": multi_absorb,
             "bid_dom_levels": bid_dom_levels, "ask_dom_levels": ask_dom_levels,
