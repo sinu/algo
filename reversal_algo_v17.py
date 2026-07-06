@@ -613,7 +613,8 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
         c = candles[i]
 
         candle_time = c.get("time", "")
-        if candle_time and len(candle_time) > 11 and candle_time[11:16] >= LAST_ENTRY_TIME:
+        _hhmm = candle_time[11:16] if len(candle_time) > 11 else candle_time[0:5]
+        if _hhmm >= LAST_ENTRY_TIME:
             continue
 
         # === TRY LONG (standard double-push) ===
@@ -1057,9 +1058,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
         
         # 1. LAST_ENTRY_TIME check
         candle_time = c.get("time", "")
-        if candle_time and len(candle_time) > 11 and candle_time[11:16] >= LAST_ENTRY_TIME:
+        _hhmm = candle_time[11:16] if len(candle_time) > 11 else candle_time[0:5]
+        if _hhmm >= LAST_ENTRY_TIME:
             break
-            
+
+        # Recompute push2 variables for current candle (must not use stale values from first loop)
+        avg_vol = sum(candles[k]["volume"] for k in range(max(0, i - 6), i)) / min(i, 6)
+        is_push2_short, push2_score_s, push2_reasons_s = _is_push_candle_short(c, avg_vol)
+
         # === TRY SHORT (stale distribution — relaxed push2 threshold) ===
         # When session high is stale (>10 bars ago) and VWAP near/above entry,
         # allow push2_score >= 2 (the rally is over, distribution confirmed)
@@ -1436,7 +1442,34 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             "signal_type": "dom_sweep_breakout",
                         })
 
-    return signals
+    # === FILTER G: Proximity & Momentum Guards ===
+    filtered = []
+    for sig in signals:
+        i = sig["candle_idx"]
+        _g_atr = _compute_atr(candles, i)
+        if _g_atr <= 0:
+            filtered.append(sig)
+            continue
+
+        _g_bypass = sig["score"] >= 9 or (abs(sig.get("push_delta", 0)) > 35000 and sig.get("push_rvol", 0) > 1.5)
+
+        if sig["side"] == "SHORT" and not _g_bypass:
+            _g_sl = min(candles[k]["low"] for k in range(0, i + 1))
+            _g_prox = (sig["entry"] - _g_sl) / _g_atr
+            if _g_prox < 1.25:
+                continue
+
+        if sig["side"] == "LONG" and not _g_bypass:
+            _g_sh = max(candles[k]["high"] for k in range(0, i + 1))
+            _g_sl = min(candles[k]["low"] for k in range(0, i + 1))
+            _g_sr = _g_sh - _g_sl
+            _g_room = (_g_sh - sig["entry"]) / _g_atr
+            if _g_room < 2.0 and _g_sr > 2.0 * _g_atr and sig.get("signal_type") != "floor_bounce":
+                continue
+
+        filtered.append(sig)
+
+    return filtered
 
 
 def evaluate_trade(sig, candles, max_bars=15):
