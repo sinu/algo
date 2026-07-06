@@ -624,7 +624,13 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
             # PEAK guard: block LONG when making new session high (breakout, not reversal)
             session_high = max(candles[k]["high"] for k in range(0, i))
-            if c["high"] >= session_high:
+            _peak_momentum_bypass = (
+                c["high"] >= session_high
+                and c["delta"] > 30000
+                and c.get("rvol", 1.0) > 1.8
+                and vwap[i] < c["close"]
+            )
+            if c["high"] >= session_high and not _peak_momentum_bypass:
                 pass
             else:
                 session_low = min(candles[k]["low"] for k in range(0, i + 1))
@@ -684,7 +690,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             if R <= atr * 0.1 or R > atr * 2.5:
                                 continue
 
-                            if R > atr * MAX_STOP_ATR:
+                            _extreme_momentum = c.get("rvol", 1.0) > 2.0 and abs(c["delta"]) > 25000
+                            _max_stop = MAX_STOP_ATR * 1.3 if _extreme_momentum else MAX_STOP_ATR
+                            if R > atr * _max_stop:
                                 continue
 
                             current_vwap = vwap[i]
@@ -1228,10 +1236,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
                                         all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "ceiling_rejection"]
 
-                                        # Trend filter: block low-score CR in early session on strong trend-up days
+                                        # Trend filter: block low-score CR on strong trend-up days
                                         _cr_trend_blocked = False
                                         if total_score < 7 and i < 15:
                                             _cr_trend_blocked = _check_short_trend_filter(candles, i, atr)
+                                        if not _cr_trend_blocked and total_score < 9 and _hhmm >= "13:00":
+                                            _cum_delta_20 = sum(candles[k]["delta"] for k in range(max(0, i - 20), i + 1))
+                                            if _cum_delta_20 > 50000 and _check_short_trend_filter(candles, i, atr):
+                                                _cr_trend_blocked = True
 
                                         if not _cr_trend_blocked:
                                             # DOM filter (same as double-push)
@@ -1327,7 +1339,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
         # === TRY LONG (Iceberg Squeeze) ===
         if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
             body = c["close"] - c["open"]
-            if c.get("ceil_abs", 0) >= 50 and 0 < c["delta"] < 20000:
+            if c.get("floor_abs", 0) >= 50 and 0 < c["delta"] < 20000:
                 recent_dr_zero = all(candles[k].get("local_dr", 0) == 0 for k in range(max(0, i-2), i+1))
                 _isq_context = session_range >= 2.0 * atr or vwap[i] < c["close"]
                 if recent_dr_zero and entry_height <= 0.70 and _isq_context:
@@ -1366,10 +1378,11 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
         # === TRY SHORT (Iceberg Squeeze) ===
         if not any(s["candle_idx"] == i and s["side"] == "SHORT" for s in signals):
             body = c["close"] - c["open"]
-            if c.get("floor_abs", 0) >= 50 and -20000 < c["delta"] < 0:
+            if c.get("ceil_abs", 0) >= 50 and -20000 < c["delta"] < 0:
                 recent_dg_zero = all(candles[k].get("local_dg", 0) == 0 for k in range(max(0, i-2), i+1))
-                _isq_s_context = session_range >= 2.0 * atr or vwap[i] > c["close"]
-                if recent_dg_zero and entry_height >= 0.30 and _isq_s_context:
+                _isq_s_context = session_range >= 2.0 * atr and vwap[i] > c["close"]
+                _isq_s_trend_blocked = _check_short_trend_filter(candles, i, atr)
+                if recent_dg_zero and entry_height >= 0.30 and _isq_s_context and not _isq_s_trend_blocked:
                     entry = _get_ref_price(c)
                     recent_high = max(candles[k]["high"] for k in range(max(0, i-3), i+1))
                     stop = recent_high + atr * 0.1
