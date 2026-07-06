@@ -900,6 +900,77 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                     "signal_type": "vwap_pullback",
                                 })
 
+        # === TRY LONG (Trend Pullback) ===
+        # Continuation LONG on trending days: session high was formed by sustained buying,
+        # price pulls back briefly with floor absorption, then resumes.
+        if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
+            if c["delta"] >= 5000 and c["close"] > c["open"]:
+                _atr_tp = _compute_atr(candles, i)
+                if _atr_tp > 0:
+                    _sh_tp = max(candles[k]["high"] for k in range(0, i))
+                    _sl_tp = min(candles[k]["low"] for k in range(0, i + 1))
+                    _sr_tp = _sh_tp - _sl_tp
+                    _depth_tp = (_sh_tp - c["close"]) / _sr_tp if _sr_tp > 0 else 0
+                    _cum_delta_tp = sum(candles[k]["delta"] for k in range(0, i + 1))
+                    _close_pct_tp = (c["close"] - c["low"]) / (c["high"] - c["low"]) if c["high"] > c["low"] else 0
+
+                    if (_cum_delta_tp >= 120000
+                            and _sr_tp >= 2.5 * _atr_tp
+                            and c["high"] < _sh_tp
+                            and 0.03 <= _depth_tp <= 0.25
+                            and _close_pct_tp >= 0.55):
+                        _high_bar_idx = max(k for k in range(0, i) if candles[k]["high"] == _sh_tp)
+                        _bars_since_high = i - _high_bar_idx
+
+                        if _bars_since_high <= 8:
+                            _zone_floor = sum(candles[k].get("floor_abs", 0) for k in range(max(0, i - 4), i + 1))
+                            _neg_bars_tp = sum(1 for k in range(max(0, i - 3), i) if candles[k]["delta"] < 0)
+                            _recent_cum_tp = sum(candles[k]["delta"] for k in range(max(0, i - 6), i + 1))
+
+                            if _zone_floor >= 15 and _neg_bars_tp >= 1 and _recent_cum_tp >= 15000:
+                                _pre_high = candles[max(0, _high_bar_idx - 5):_high_bar_idx + 1]
+                                _pre_high_cum = sum(x["delta"] for x in _pre_high)
+
+                                if _pre_high_cum >= 50000:
+                                    _consol_lows = [candles[k]["low"] for k in range(max(0, i - 4), i + 1)]
+                                    _consol_highs = [candles[k]["high"] for k in range(max(0, i - 4), i + 1)]
+                                    _consol_range = max(_consol_highs) - min(_consol_lows)
+
+                                    if _consol_range <= 2.0 * _atr_tp:
+                                        _entry_tp = _get_ref_price(c)
+                                        _stop_tp = min(_consol_lows) - _atr_tp * 0.1
+                                        _R_tp = _entry_tp - _stop_tp
+
+                                        if _R_tp > _atr_tp * 0.2 and _R_tp <= _atr_tp * 1.5:
+                                            _target_tp = _entry_tp + _R_tp * TARGET_R
+                                            _score_tp = 8 + (2 if _zone_floor >= 50 else 0) + (1 if _cum_delta_tp >= 200000 else 0)
+                                            _grade_tp = "A+" if _score_tp >= 11 else "A" if _score_tp >= 9 else "B+"
+
+                                            signals.append({
+                                                "side": "LONG",
+                                                "candle_idx": i,
+                                                "push1_idx": _high_bar_idx,
+                                                "time": c.get("time", ""),
+                                                "entry": _entry_tp,
+                                                "stop": _stop_tp,
+                                                "target": _target_tp,
+                                                "R": _R_tp,
+                                                "score": _score_tp,
+                                                "grade": _grade_tp,
+                                                "initiative_score": 4,
+                                                "abs_score": 4,
+                                                "push1_score": 0,
+                                                "push2_score": 0,
+                                                "reasons": [f"trend_pb", f"fl_zone={_zone_floor}", f"cum={_cum_delta_tp/1000:.0f}K"],
+                                                "vwap": vwap[i],
+                                                "vwap_support": True,
+                                                "push_rvol": c.get("rvol", 1.0),
+                                                "push_dg": c.get("local_dg", 0),
+                                                "push_dr": 0,
+                                                "push_delta": c["delta"],
+                                                "signal_type": "trend_pullback",
+                                            })
+
         # === TRY SHORT (standard double-push) ===
         is_push2_short, push2_score_s, push2_reasons_s = _is_push_candle_short(c, avg_vol)
         if is_push2_short and push2_score_s >= 3:
