@@ -746,73 +746,91 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                     session_range = session_high - session_low
                     entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
                     if c["high"] < session_high and entry_depth >= 0.30:
-                        for gap in range(1, 4):
-                            p1_idx = i - gap
-                            if p1_idx < 5:
-                                break
-                            p1 = candles[p1_idx]
-                            if p1["delta"] <= 0:
-                                continue
-
-                            abs_atr = _compute_atr(candles, p1_idx)
-                            abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
-                            if abs_score < 3:
-                                continue
-
-                            _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
-                            entry = _get_ref_price(c)
-                            push_low = min(p1["low"], c["low"])
-                            pre_push_low = candles[max(0, p1_idx - 1)]["low"]
-                            stop = min(push_low, pre_push_low) - atr * 0.1
-                            R = entry - stop
-
-                            if R <= atr * 0.1 or R > atr * 2.5:
-                                continue
-                            if R > atr * MAX_STOP_ATR:
-                                continue
-
-                            current_vwap = vwap[i]
-                            target = entry + R * TARGET_R
-
-                            if current_vwap > entry and (current_vwap - entry) < R:
-                                continue
-
-                            vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
-                            total_score = abs_score + 1 + max(1, push1_score_l // 2)
-
-                            if total_score >= 9:
-                                grade = "A"
-                            elif total_score >= 7:
-                                grade = "B+"
+                        # Filter A: trapped-at-low distribution blocker
+                        _bnl = sum(1 for _k in range(max(0, i - 8), i + 1)
+                                   if (candles[_k]["low"] - session_low) < atr * 1.5)
+                        _cd9 = sum(candles[_k]["delta"] for _k in range(max(0, i - 8), i + 1))
+                        if _bnl >= 7 and _cd9 > 0:
+                            pass
+                        else:
+                            # Filter C: spike-bounce dead-cat blocker
+                            _sr_atr2 = session_range / atr if atr > 0 else 0
+                            _eh2 = (_get_ref_price(c) - session_low) / session_range if session_range > 0 else 0
+                            _cum6_2 = sum(candles[_k]["delta"] for _k in range(max(0, i - 6), i))
+                            _sb_ratio2 = abs(c["delta"] / _cum6_2) if _cum6_2 < 0 else 0
+                            _spike_bounce_block2 = (_sr_atr2 >= 3.0 and _cum6_2 < 0
+                                                    and _sb_ratio2 >= 0.60
+                                                    and 0.40 <= _eh2 < 0.65)
+                            if _spike_bounce_block2:
+                                pass
                             else:
-                                grade = "B"
+                                for gap in range(1, 4):
+                                    p1_idx = i - gap
+                                    if p1_idx < 5:
+                                        break
+                                    p1 = candles[p1_idx]
+                                    if p1["delta"] <= 0:
+                                        continue
 
-                            all_reasons = abs_reasons + push1_reasons_l + ["floor_bounce"]
-                            signals.append({
-                                "side": "LONG",
-                                "candle_idx": i,
-                                "push1_idx": p1_idx,
-                                "time": c.get("time", ""),
-                                "entry": entry,
-                                "stop": stop,
-                                "target": target,
-                                "R": R,
-                                "score": total_score,
-                                "grade": grade,
-                                "initiative_score": 1 + max(1, push1_score_l // 2),
-                                "abs_score": abs_score,
-                                "push1_score": push1_score_l,
-                                "push2_score": 0,
-                                "reasons": all_reasons,
-                                "vwap": current_vwap,
-                                "vwap_support": vwap_support,
-                                "push_rvol": c.get("rvol", 1.0),
-                                "push_dg": c.get("local_dg", 0),
-                                "push_dr": 0,
-                                "push_delta": c["delta"],
-                                "signal_type": "floor_bounce",
-                            })
-                            break
+                                    abs_atr = _compute_atr(candles, p1_idx)
+                                    abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
+                                    if abs_score < 3:
+                                        continue
+
+                                    _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
+                                    entry = _get_ref_price(c)
+                                    push_low = min(p1["low"], c["low"])
+                                    pre_push_low = candles[max(0, p1_idx - 1)]["low"]
+                                    stop = min(push_low, pre_push_low) - atr * 0.1
+                                    R = entry - stop
+
+                                    if R <= atr * 0.1 or R > atr * 2.5:
+                                        continue
+                                    if R > atr * MAX_STOP_ATR:
+                                        continue
+
+                                    current_vwap = vwap[i]
+                                    target = entry + R * TARGET_R
+
+                                    if current_vwap > entry and (current_vwap - entry) < R:
+                                        continue
+
+                                    vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
+                                    total_score = abs_score + 1 + max(1, push1_score_l // 2)
+
+                                    if total_score >= 9:
+                                        grade = "A"
+                                    elif total_score >= 7:
+                                        grade = "B+"
+                                    else:
+                                        grade = "B"
+
+                                    all_reasons = abs_reasons + push1_reasons_l + ["floor_bounce"]
+                                    signals.append({
+                                        "side": "LONG",
+                                        "candle_idx": i,
+                                        "push1_idx": p1_idx,
+                                        "time": c.get("time", ""),
+                                        "entry": entry,
+                                        "stop": stop,
+                                        "target": target,
+                                        "R": R,
+                                        "score": total_score,
+                                        "grade": grade,
+                                        "initiative_score": 1 + max(1, push1_score_l // 2),
+                                        "abs_score": abs_score,
+                                        "push1_score": push1_score_l,
+                                        "push2_score": 0,
+                                        "reasons": all_reasons,
+                                        "vwap": current_vwap,
+                                        "vwap_support": vwap_support,
+                                        "push_rvol": c.get("rvol", 1.0),
+                                        "push_dg": c.get("local_dg", 0),
+                                        "push_dr": 0,
+                                        "push_delta": c["delta"],
+                                        "signal_type": "floor_bounce",
+                                    })
+                                    break
 
         # === TRY LONG (VWAP pullback) ===
         # Price broke above VWAP, rallied, pulled back to VWAP, DG-L-DG at VWAP support
