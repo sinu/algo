@@ -1273,93 +1273,102 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
         if not any(s["candle_idx"] == i and s["side"] == "SHORT" for s in signals):
             _has_ceil = c.get("ceil_abs", 0) > 0
             _dr_strong = c.get("local_dr", 0) >= 3
-            if c["delta"] < 0 and _dr_strong:
-                atr = _compute_atr(candles, i)
-                session_high = max(candles[k]["high"] for k in range(0, i + 1))
-                session_low = min(candles[k]["low"] for k in range(0, i + 1))
-                session_range = session_high - session_low
+            _cr_ceil_only = _has_ceil and not _dr_strong
+            if c["delta"] < 0 and (_dr_strong or _has_ceil):
+                if _cr_ceil_only and abs(c["delta"]) < 5000:
+                    pass
+                else:
+                    atr = _compute_atr(candles, i)
+                    session_high = max(candles[k]["high"] for k in range(0, i + 1))
+                    session_low = min(candles[k]["low"] for k in range(0, i + 1))
+                    session_range = session_high - session_low
 
-                # Must be near session high (upper 30% of range)
-                entry_height = (c["close"] - session_low) / session_range if session_range > 0 else 0.5
-                if entry_height >= 0.70:
-                    # Session high must have been made within last 3 candles
-                    high_maker_idx = max(range(0, i + 1), key=lambda k: candles[k]["high"])
-                    if i - high_maker_idx <= 2:
-                        # NOT making new session low
-                        _local_lows = [candles[k]["low"] for k in range(max(0, i - 6), i)]
-                        _not_new_low = c["low"] > min(_local_lows) if _local_lows else False
-                        if _not_new_low:
-                            # Buyer absorption confirmation (buyers tried, got absorbed)
-                            abs_atr = _compute_atr(candles, i)
-                            abs_score, abs_reasons = _detect_buyer_absorption(candles, i, abs_atr)
-                            if abs_score >= 3 or _has_ceil:
-                                abs_score = max(abs_score, 3 if _has_ceil else 0)
-                                entry = _get_ref_price(c)
-                                stop = session_high + atr * 0.2
-                                R = stop - entry
+                    _cr_cum_delta = sum(candles[k]["delta"] for k in range(0, i + 1))
+                    _cr_early_session = i < 20
+                    _cr_trend_up_block = _cr_cum_delta > 150000 and _cr_early_session
+                    _cr_over_extended = session_range > 10.0 * atr
 
-                                if R > atr * 0.15 and R <= atr * 1.6:
-                                    current_vwap = vwap[i]
-                                    if current_vwap < entry:
-                                        target = entry - R * TARGET_R
+                    # Must be near session high (upper 30% of range)
+                    entry_height = (c["close"] - session_low) / session_range if session_range > 0 else 0.5
+                    if entry_height >= 0.70 and not (_cr_ceil_only and (_cr_trend_up_block or _cr_over_extended)):
+                        # Session high must have been made within last 3 candles
+                        high_maker_idx = max(range(0, i + 1), key=lambda k: candles[k]["high"])
+                        if i - high_maker_idx <= 2:
+                            # NOT making new session low
+                            _local_lows = [candles[k]["low"] for k in range(max(0, i - 6), i)]
+                            _not_new_low = c["low"] > min(_local_lows) if _local_lows else False
+                            if _not_new_low:
+                                # Buyer absorption confirmation (buyers tried, got absorbed)
+                                abs_atr = _compute_atr(candles, i)
+                                abs_score, abs_reasons = _detect_buyer_absorption(candles, i, abs_atr)
+                                if abs_score >= 3 or _has_ceil:
+                                    abs_score = max(abs_score, 3 if _has_ceil else 0)
+                                    entry = _get_ref_price(c)
+                                    stop = session_high + atr * 0.2
+                                    R = stop - entry
 
-                                        total_score = abs_score + 1 + c.get("local_dr", 0) // 2
-                                        if total_score >= 9:
-                                            grade = "A"
-                                        elif total_score >= 7:
-                                            grade = "B+"
-                                        else:
-                                            grade = "B"
+                                    if R > atr * 0.15 and R <= atr * 1.6:
+                                        current_vwap = vwap[i]
+                                        if current_vwap < entry:
+                                            target = entry - R * TARGET_R
 
-                                        all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "ceiling_rejection"]
+                                            total_score = abs_score + 1 + c.get("local_dr", 0) // 2
+                                            if total_score >= 9:
+                                                grade = "A"
+                                            elif total_score >= 7:
+                                                grade = "B+"
+                                            else:
+                                                grade = "B"
 
-                                        # Trend filter: block low-score CR on strong trend-up days
-                                        _cr_trend_blocked = False
-                                        if total_score < 7 and i < 15:
-                                            _cr_trend_blocked = _check_short_trend_filter(candles, i, atr)
-                                        if not _cr_trend_blocked and total_score < 9 and _hhmm >= "13:00":
-                                            _cum_delta_20 = sum(candles[k]["delta"] for k in range(max(0, i - 20), i + 1))
-                                            if _cum_delta_20 > 50000 and _check_short_trend_filter(candles, i, atr):
-                                                _cr_trend_blocked = True
+                                            all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "ceiling_rejection"]
 
-                                        if not _cr_trend_blocked:
-                                            # DOM filter (same as double-push)
-                                            dom_single_net = c.get("bid_dom_levels", 0) - c.get("ask_dom_levels", 0)
-                                            dom_cum_bid = sum(candles[k].get("bid_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
-                                            dom_cum_ask = sum(candles[k].get("ask_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
-                                            dom_cum_net = dom_cum_bid - dom_cum_ask
-                                            if dom_single_net > 0 or dom_cum_net > 0:
-                                                signals.append({
-                                                    "side": "SHORT",
-                                                    "candle_idx": i,
-                                                    "push1_idx": i,
-                                                    "time": c.get("time", ""),
-                                                    "entry": entry,
-                                                    "stop": stop,
-                                                    "target": target,
-                                                    "R": R,
-                                                    "score": total_score,
-                                                    "grade": grade,
-                                                    "initiative_score": 1 + c.get("local_dr", 0) // 2,
-                                                    "abs_score": abs_score,
-                                                    "push1_score": 0,
-                                                    "push2_score": c.get("local_dr", 0),
-                                                    "reasons": all_reasons,
-                                                    "vwap": current_vwap,
-                                                    "vwap_support": True,
-                                                    "push_rvol": c.get("rvol", 1.0),
-                                                    "push_dg": 0,
-                                                    "push_dr": c.get("local_dr", 0),
-                                                    "push_delta": c["delta"],
-                                                    "signal_type": "ceiling_rejection",
-                                                })
+                                            # Trend filter: block low-score CR on strong trend-up days
+                                            _cr_trend_blocked = False
+                                            if total_score < 7 and i < 15:
+                                                _cr_trend_blocked = _check_short_trend_filter(candles, i, atr)
+                                            if not _cr_trend_blocked and total_score < 9 and _hhmm >= "13:00":
+                                                _cum_delta_20 = sum(candles[k]["delta"] for k in range(max(0, i - 20), i + 1))
+                                                if _cum_delta_20 > 50000 and _check_short_trend_filter(candles, i, atr):
+                                                    _cr_trend_blocked = True
+
+                                            if not _cr_trend_blocked:
+                                                # DOM filter (same as double-push)
+                                                dom_single_net = c.get("bid_dom_levels", 0) - c.get("ask_dom_levels", 0)
+                                                dom_cum_bid = sum(candles[k].get("bid_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
+                                                dom_cum_ask = sum(candles[k].get("ask_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
+                                                dom_cum_net = dom_cum_bid - dom_cum_ask
+                                                if dom_single_net > 0 or dom_cum_net > 0:
+                                                    signals.append({
+                                                        "side": "SHORT",
+                                                        "candle_idx": i,
+                                                        "push1_idx": i,
+                                                        "time": c.get("time", ""),
+                                                        "entry": entry,
+                                                        "stop": stop,
+                                                        "target": target,
+                                                        "R": R,
+                                                        "score": total_score,
+                                                        "grade": grade,
+                                                        "initiative_score": 1 + c.get("local_dr", 0) // 2,
+                                                        "abs_score": abs_score,
+                                                        "push1_score": 0,
+                                                        "push2_score": c.get("local_dr", 0),
+                                                        "reasons": all_reasons,
+                                                        "vwap": current_vwap,
+                                                        "vwap_support": True,
+                                                        "push_rvol": c.get("rvol", 1.0),
+                                                        "push_dg": 0,
+                                                        "push_dr": c.get("local_dr", 0),
+                                                        "push_delta": c["delta"],
+                                                        "signal_type": "ceiling_rejection",
+                                                    })
 
         # === TRY SHORT (failed breakout) ===
         # Prior bar = strong buy push (breakout attempt), signal bar = immediate rejection
         if not any(s["candle_idx"] == i and s["side"] == "SHORT" for s in signals):
             _prior = candles[i - 1] if i >= 1 else None
-            if _prior and _prior["delta"] > 15000 and _prior.get("local_dg", 0) >= 3:
-                if c["delta"] < 0 and c.get("local_dr", 0) >= 3:
+            if _prior and _prior["delta"] > 15000 and (_prior.get("local_dg", 0) >= 3 or _prior["delta"] > 20000):
+                if c["delta"] < 0 and (c.get("local_dr", 0) >= 3 or abs(c["delta"]) > 15000):
                     _fb_atr = _compute_atr(candles, i)
                     _fb_sh = max(candles[k]["high"] for k in range(0, i + 1))
                     _fb_sl = min(candles[k]["low"] for k in range(0, i + 1))
@@ -1371,36 +1380,41 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             _fb_stop = max(_prior["high"], c["high"]) + _fb_atr * 0.2
                             _fb_R = _fb_stop - _fb_entry
                             if _fb_R > _fb_atr * 0.15 and _fb_R <= _fb_atr * 2.5:
-                                _fb_target = _fb_entry - _fb_R * TARGET_R
-                                _fb_score = 3 + c.get("local_dr", 0) // 2
-                                _fb_grade = "A" if _fb_score >= 6 else "B+"
-                                signals.append({
-                                    "side": "SHORT",
-                                    "candle_idx": i,
-                                    "push1_idx": i - 1,
-                                    "time": c.get("time", ""),
-                                    "entry": _fb_entry,
-                                    "stop": _fb_stop,
-                                    "target": _fb_target,
-                                    "R": _fb_R,
-                                    "score": _fb_score,
-                                    "grade": _fb_grade,
-                                    "initiative_score": 3,
-                                    "abs_score": 0,
-                                    "push1_score": 0,
-                                    "push2_score": c.get("local_dr", 0),
-                                    "reasons": [f"fb_prior_dg={_prior.get('local_dg', 0)}",
-                                                f"fb_prior_delta={_prior['delta']/1000:.0f}K",
-                                                f"dr={c.get('local_dr', 0)}",
-                                                "failed_breakout"],
-                                    "vwap": vwap[i],
-                                    "vwap_support": False,
-                                    "push_rvol": c.get("rvol", 1.0),
-                                    "push_dg": 0,
-                                    "push_dr": c.get("local_dr", 0),
-                                    "push_delta": c["delta"],
-                                    "signal_type": "failed_breakout",
-                                })
+                                _fb_cum = sum(candles[k]["delta"] for k in range(0, i + 1))
+                                _fb_trend_block = _fb_cum > 200000
+                                if _fb_trend_block:
+                                    pass
+                                else:
+                                    _fb_target = _fb_entry - _fb_R * TARGET_R
+                                    _fb_score = 3 + c.get("local_dr", 0) // 2
+                                    _fb_grade = "A" if _fb_score >= 6 else "B+"
+                                    signals.append({
+                                        "side": "SHORT",
+                                        "candle_idx": i,
+                                        "push1_idx": i - 1,
+                                        "time": c.get("time", ""),
+                                        "entry": _fb_entry,
+                                        "stop": _fb_stop,
+                                        "target": _fb_target,
+                                        "R": _fb_R,
+                                        "score": _fb_score,
+                                        "grade": _fb_grade,
+                                        "initiative_score": 3,
+                                        "abs_score": 0,
+                                        "push1_score": 0,
+                                        "push2_score": c.get("local_dr", 0),
+                                        "reasons": [f"fb_prior_dg={_prior.get('local_dg', 0)}",
+                                                    f"fb_prior_delta={_prior['delta']/1000:.0f}K",
+                                                    f"dr={c.get('local_dr', 0)}",
+                                                    "failed_breakout"],
+                                        "vwap": vwap[i],
+                                        "vwap_support": False,
+                                        "push_rvol": c.get("rvol", 1.0),
+                                        "push_dg": 0,
+                                        "push_dr": c.get("local_dr", 0),
+                                        "push_delta": c["delta"],
+                                        "signal_type": "failed_breakout",
+                                    })
 
         # === LONG cascade intentionally omitted (negative expectancy in backtest) ===
 
