@@ -1476,7 +1476,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             _g_sl = min(candles[k]["low"] for k in range(0, i + 1))
             _g_sr = _g_sh - _g_sl
             _g_room = (_g_sh - sig["entry"]) / _g_atr
-            if _g_room < 2.0 and _g_sr > 4.0 * _g_atr and sig.get("signal_type") != "floor_bounce":
+            if _g_room < 2.0 and _g_sr > 6.0 * _g_atr and sig.get("signal_type") != "floor_bounce":
                 continue
 
         filtered.append(sig)
