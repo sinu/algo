@@ -1228,36 +1228,42 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
                                         all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "ceiling_rejection"]
 
-                                        # DOM filter (same as double-push)
-                                        dom_single_net = c.get("bid_dom_levels", 0) - c.get("ask_dom_levels", 0)
-                                        dom_cum_bid = sum(candles[k].get("bid_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
-                                        dom_cum_ask = sum(candles[k].get("ask_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
-                                        dom_cum_net = dom_cum_bid - dom_cum_ask
-                                        if dom_single_net > 0 or dom_cum_net > 0:
-                                            signals.append({
-                                                "side": "SHORT",
-                                                "candle_idx": i,
-                                                "push1_idx": i,
-                                                "time": c.get("time", ""),
-                                                "entry": entry,
-                                                "stop": stop,
-                                                "target": target,
-                                                "R": R,
-                                                "score": total_score,
-                                                "grade": grade,
-                                                "initiative_score": 1 + c.get("local_dr", 0) // 2,
-                                                "abs_score": abs_score,
-                                                "push1_score": 0,
-                                                "push2_score": c.get("local_dr", 0),
-                                                "reasons": all_reasons,
-                                                "vwap": current_vwap,
-                                                "vwap_support": True,
-                                                "push_rvol": c.get("rvol", 1.0),
-                                                "push_dg": 0,
-                                                "push_dr": c.get("local_dr", 0),
-                                                "push_delta": c["delta"],
-                                                "signal_type": "ceiling_rejection",
-                                            })
+                                        # Trend filter: block low-score CR in early session on strong trend-up days
+                                        _cr_trend_blocked = False
+                                        if total_score < 7 and i < 15:
+                                            _cr_trend_blocked = _check_short_trend_filter(candles, i, atr)
+
+                                        if not _cr_trend_blocked:
+                                            # DOM filter (same as double-push)
+                                            dom_single_net = c.get("bid_dom_levels", 0) - c.get("ask_dom_levels", 0)
+                                            dom_cum_bid = sum(candles[k].get("bid_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
+                                            dom_cum_ask = sum(candles[k].get("ask_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
+                                            dom_cum_net = dom_cum_bid - dom_cum_ask
+                                            if dom_single_net > 0 or dom_cum_net > 0:
+                                                signals.append({
+                                                    "side": "SHORT",
+                                                    "candle_idx": i,
+                                                    "push1_idx": i,
+                                                    "time": c.get("time", ""),
+                                                    "entry": entry,
+                                                    "stop": stop,
+                                                    "target": target,
+                                                    "R": R,
+                                                    "score": total_score,
+                                                    "grade": grade,
+                                                    "initiative_score": 1 + c.get("local_dr", 0) // 2,
+                                                    "abs_score": abs_score,
+                                                    "push1_score": 0,
+                                                    "push2_score": c.get("local_dr", 0),
+                                                    "reasons": all_reasons,
+                                                    "vwap": current_vwap,
+                                                    "vwap_support": True,
+                                                    "push_rvol": c.get("rvol", 1.0),
+                                                    "push_dg": 0,
+                                                    "push_dr": c.get("local_dr", 0),
+                                                    "push_delta": c["delta"],
+                                                    "signal_type": "ceiling_rejection",
+                                                })
 
         # === TRY SHORT (failed breakout) ===
         # Prior bar = strong buy push (breakout attempt), signal bar = immediate rejection
