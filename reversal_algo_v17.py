@@ -626,8 +626,8 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             session_high = max(candles[k]["high"] for k in range(0, i))
             _peak_momentum_bypass = (
                 c["high"] >= session_high
-                and c["delta"] > 30000
-                and c.get("rvol", 1.0) > 1.8
+                and c["delta"] > 80000
+                and c.get("rvol", 1.0) > 2.0
                 and vwap[i] < c["close"]
             )
             
