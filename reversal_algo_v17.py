@@ -624,13 +624,11 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
             # PEAK guard: block LONG when making new session high (breakout, not reversal)
             session_high = max(candles[k]["high"] for k in range(0, i))
-            _prior_drop = session_high - min(candles[k]["low"] for k in range(max(0, i - 10), i))
             _peak_momentum_bypass = (
                 c["high"] >= session_high
                 and c["delta"] > 30000
                 and c.get("rvol", 1.0) > 1.8
                 and vwap[i] < c["close"]
-                and (atr <= 0 or _prior_drop / atr < 3.0)
             )
             
             session_low = min(candles[k]["low"] for k in range(0, i + 1))
