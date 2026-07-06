@@ -636,89 +636,101 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
                     pass
                 else:
+                    # Filter A: trapped-at-low distribution blocker
+                    _bars_near_low = sum(1 for _k in range(max(0, i - 8), i + 1) if (candles[_k]["low"] - session_low) < atr * 1.5)
+                    _cum_delta_9 = sum(candles[_k]["delta"] for _k in range(max(0, i - 8), i + 1))
+                    _trapped_at_low = (_bars_near_low >= 7 and _cum_delta_9 > 0)
 
-                    for gap in range(1, 4):
-                        p1_idx = i - gap
-                        if p1_idx < 5:
+                    # Filter C: spike-bounce dead-cat blocker
+                    _sr_atr = session_range / atr if atr > 0 else 0
+                    _eh = (_get_ref_price(c) - session_low) / session_range if session_range > 0 else 0
+                    _cum6 = sum(candles[_k]["delta"] for _k in range(max(0, i - 6), i))
+                    _sb_ratio = abs(c["delta"] / _cum6) if _cum6 < 0 else 0
+                    _spike_bounce = (_sr_atr >= 3.0 and _cum6 < 0 and _sb_ratio >= 0.60 and 0.40 <= _eh < 0.65)
+
+                    if not _trapped_at_low and not _spike_bounce:
+                        for gap in range(1, 4):
+                            p1_idx = i - gap
+                            if p1_idx < 5:
+                                break
+                            p1 = candles[p1_idx]
+
+                            if p1["delta"] <= 0:
+                                continue
+                            _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
+
+                            between = candles[p1_idx + 1:i]
+                            counter_push = any(x["delta"] < -15000 for x in between)
+                            if counter_push:
+                                continue
+
+                            initiative_score = push2_score_l + max(1, push1_score_l // 2)
+
+                            abs_atr = _compute_atr(candles, p1_idx)
+                            abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
+                            if abs_score == 0:
+                                continue
+
+                            total_score = initiative_score + abs_score
+                            if total_score < min_score:
+                                continue
+
+                            entry = _get_ref_price(c)
+                            push_low = min(p1["low"], c["low"])
+                            pre_push_low = candles[max(0, p1_idx - 1)]["low"]
+                            stop = min(push_low, pre_push_low) - atr * 0.1
+                            R = entry - stop
+
+                            if R <= atr * 0.1 or R > atr * 2.5:
+                                continue
+
+                            if R > atr * MAX_STOP_ATR:
+                                continue
+
+                            current_vwap = vwap[i]
+                            target = entry + R * TARGET_R
+
+                            if current_vwap > entry and (current_vwap - entry) < R:
+                                continue
+
+                            vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
+
+                            if total_score >= 11:
+                                grade = "A+"
+                            elif total_score >= 9:
+                                grade = "A"
+                            elif total_score >= 7:
+                                grade = "B+"
+                            else:
+                                grade = "B"
+
+                            all_reasons = abs_reasons + push1_reasons_l + push2_reasons_l
+
+                            signals.append({
+                                "side": "LONG",
+                                "candle_idx": i,
+                                "push1_idx": p1_idx,
+                                "time": c.get("time", ""),
+                                "entry": entry,
+                                "stop": stop,
+                                "target": target,
+                                "R": R,
+                                "score": total_score,
+                                "grade": grade,
+                                "initiative_score": initiative_score,
+                                "abs_score": abs_score,
+                                "push1_score": push1_score_l,
+                                "push2_score": push2_score_l,
+                                "reasons": all_reasons,
+                                "vwap": current_vwap,
+                                "vwap_support": vwap_support,
+                                "push_rvol": c.get("rvol", 1.0),
+                                "push_dg": c.get("local_dg", 0),
+                                "push_dr": 0,
+                                "push_delta": c["delta"],
+                                "signal_type": "double_push",
+                            })
                             break
-                        p1 = candles[p1_idx]
-
-                        if p1["delta"] <= 0:
-                            continue
-                        _, push1_score_l, push1_reasons_l = _is_push_candle_long(p1, avg_vol)
-
-                        between = candles[p1_idx + 1:i]
-                        counter_push = any(x["delta"] < -15000 for x in between)
-                        if counter_push:
-                            continue
-
-                        initiative_score = push2_score_l + max(1, push1_score_l // 2)
-
-                        abs_atr = _compute_atr(candles, p1_idx)
-                        abs_score, abs_reasons = _detect_seller_absorption(candles, p1_idx, abs_atr)
-                        if abs_score == 0:
-                            continue
-
-                        total_score = initiative_score + abs_score
-                        if total_score < min_score:
-                            continue
-
-                        entry = _get_ref_price(c)
-                        push_low = min(p1["low"], c["low"])
-                        pre_push_low = candles[max(0, p1_idx - 1)]["low"]
-                        stop = min(push_low, pre_push_low) - atr * 0.1
-                        R = entry - stop
-
-                        if R <= atr * 0.1 or R > atr * 2.5:
-                            continue
-
-                        if R > atr * MAX_STOP_ATR:
-                            continue
-
-                        current_vwap = vwap[i]
-                        target = entry + R * TARGET_R
-
-                        if current_vwap > entry and (current_vwap - entry) < R:
-                            continue
-
-                        vwap_support = current_vwap < entry and (entry - current_vwap) < R * 0.5
-
-                        if total_score >= 11:
-                            grade = "A+"
-                        elif total_score >= 9:
-                            grade = "A"
-                        elif total_score >= 7:
-                            grade = "B+"
-                        else:
-                            grade = "B"
-
-                        all_reasons = abs_reasons + push1_reasons_l + push2_reasons_l
-
-                        signals.append({
-                            "side": "LONG",
-                            "candle_idx": i,
-                            "push1_idx": p1_idx,
-                            "time": c.get("time", ""),
-                            "entry": entry,
-                            "stop": stop,
-                            "target": target,
-                            "R": R,
-                            "score": total_score,
-                            "grade": grade,
-                            "initiative_score": initiative_score,
-                            "abs_score": abs_score,
-                            "push1_score": push1_score_l,
-                            "push2_score": push2_score_l,
-                            "reasons": all_reasons,
-                            "vwap": current_vwap,
-                            "vwap_support": vwap_support,
-                            "push_rvol": c.get("rvol", 1.0),
-                            "push_dg": c.get("local_dg", 0),
-                            "push_dr": 0,
-                            "push_delta": c["delta"],
-                            "signal_type": "double_push",
-                        })
-                        break
 
         # === TRY LONG (absorption-confirmed bounce) ===
         # Narrow path: floor_abs on signal candle + NOT making new local low = bounce confirmed
@@ -1464,7 +1476,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             _g_sl = min(candles[k]["low"] for k in range(0, i + 1))
             _g_sr = _g_sh - _g_sl
             _g_room = (_g_sh - sig["entry"]) / _g_atr
-            if _g_room < 2.0 and _g_sr > 2.0 * _g_atr and sig.get("signal_type") != "floor_bounce":
+            if _g_room < 2.0 and _g_sr > 4.0 * _g_atr and sig.get("signal_type") != "floor_bounce":
                 continue
 
         filtered.append(sig)
