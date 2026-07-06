@@ -1609,7 +1609,86 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         filtered.append(sig)
 
-    return filtered
+    # === FILTER G2: Adaptive Context Guards (ATR-relative) ===
+    context_filtered = []
+    _session_open = candles[0]["open"] if candles else 0
+    for sig in filtered:
+        i = sig["candle_idx"]
+        _g2_atr = _compute_atr(candles, i)
+        if _g2_atr <= 0:
+            context_filtered.append(sig)
+            continue
+
+        _g2_side = sig["side"]
+        _g2_type = sig.get("signal_type", "")
+
+        # 1. Block cascade (18% WR, no edge)
+        if _g2_type == "cascade":
+            continue
+
+        # 2. Block LONG near session high when session is NOT trending up
+        #    (chasing high in a flat/weak session)
+        if _g2_side == "LONG":
+            _g2_sh = max(candles[k]["high"] for k in range(0, i + 1))
+            _g2_bsh = 0
+            for b in range(i, -1, -1):
+                if candles[b]["high"] == _g2_sh:
+                    _g2_bsh = i - b
+                    break
+            _g2_move = (candles[i]["close"] - _session_open) / _g2_atr
+            if _g2_bsh <= 3 and _g2_move < 1.0:
+                continue
+
+        # 3. Block LONG when price dropped > 1.5 ATR in last 5 bars
+        #    (buying into active selling momentum)
+        if _g2_side == "LONG":
+            _g2_prev_close = candles[max(0, i - 4)]["close"]
+            _g2_recent_move = (candles[i]["close"] - _g2_prev_close) / _g2_atr
+            if _g2_recent_move < -1.5:
+                continue
+
+        context_filtered.append(sig)
+
+    # === FILTER H: Position Overlap Guard ===
+    # Block signals that fire while a prior trade is still active (same side)
+    no_overlap = []
+    active_trades = []  # list of (side, entry_idx, exit_idx)
+    for sig in sorted(context_filtered, key=lambda s: s["candle_idx"]):
+        sig_idx = sig["candle_idx"]
+        sig_side = sig["side"]
+
+        # Check if any prior same-side trade is still active
+        blocked = False
+        for (t_side, t_entry_idx, t_exit_idx) in active_trades:
+            if t_side == sig_side and sig_idx <= t_exit_idx:
+                blocked = True
+                break
+        if blocked:
+            continue
+
+        # Determine when this trade exits (resolve it)
+        t_exit = sig_idx  # default: same bar (if can't resolve)
+        entry = sig["entry"]
+        stop = sig["stop"]
+        target = sig["target"]
+        max_bars = 15
+        n_candles = len(candles)
+        for j in range(sig_idx + 1, min(sig_idx + max_bars, n_candles)):
+            if sig_side == "LONG":
+                if candles[j]["low"] <= stop or candles[j]["high"] >= target:
+                    t_exit = j
+                    break
+            else:
+                if candles[j]["high"] >= stop or candles[j]["low"] <= target:
+                    t_exit = j
+                    break
+        else:
+            t_exit = min(sig_idx + max_bars - 1, n_candles - 1)
+
+        active_trades.append((sig_side, sig_idx, t_exit))
+        no_overlap.append(sig)
+
+    return no_overlap
 
 
 def evaluate_trade(sig, candles, max_bars=15):
