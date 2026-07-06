@@ -536,6 +536,11 @@ def main():
           (" Entering live loop.\n" if is_live else "\n"))
     sys.stdout.flush()
 
+    # For backtest dates (past), print summary and exit immediately
+    if not is_live:
+        v17_runner.print_summary()
+        return
+
     try:
         while True:
             wait_sec = get_seconds_to_next_bar()
