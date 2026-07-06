@@ -630,19 +630,23 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 and c.get("rvol", 1.0) > 1.8
                 and vwap[i] < c["close"]
             )
+            
+            session_low = min(candles[k]["low"] for k in range(0, i + 1))
+            session_range = session_high - session_low
+            entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
+            
+            _is_blocked = False
             if c["high"] >= session_high and not _peak_momentum_bypass:
+                _is_blocked = True
+            elif not _peak_momentum_bypass and entry_depth < 0.15:
+                _is_blocked = True
+            elif not _peak_momentum_bypass and c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
+                _is_blocked = True
+                
+            if _is_blocked:
                 pass
             else:
-                session_low = min(candles[k]["low"] for k in range(0, i + 1))
-                session_range = session_high - session_low
-                entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
-                if entry_depth < 0.15:
-                    pass
-                # Block when making new local high (buying into rally, not reversal from support)
-                elif c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
-                    pass
-                else:
-                    # Filter A: trapped-at-low distribution blocker
+                # Filter A: trapped-at-low distribution blocker
                     _bars_near_low = sum(1 for _k in range(max(0, i - 8), i + 1) if (candles[_k]["low"] - session_low) < atr * 1.5)
                     _cum_delta_9 = sum(candles[_k]["delta"] for _k in range(max(0, i - 8), i + 1))
                     _trapped_at_low = (_bars_near_low >= 7 and _cum_delta_9 > 0)
@@ -687,12 +691,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             stop = min(push_low, pre_push_low) - atr * 0.1
                             R = entry - stop
 
-                            if R <= atr * 0.1 or R > atr * 2.5:
+                            if R <= atr * 0.1:
                                 continue
 
                             _extreme_momentum = c.get("rvol", 1.0) > 2.0 and abs(c["delta"]) > 25000
-                            _max_stop = MAX_STOP_ATR * 1.3 if _extreme_momentum else MAX_STOP_ATR
-                            if R > atr * _max_stop:
+                            _max_stop = 5.0 if _extreme_momentum else MAX_STOP_ATR
+                            
+                            _base_limit = 5.0 if _extreme_momentum else 2.5
+                            if R > atr * _base_limit or R > atr * _max_stop:
                                 continue
 
                             current_vwap = vwap[i]
@@ -939,10 +945,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 stop = recent_high + atr * 0.2
                 R = stop - entry
 
-                if R <= atr * 0.15 or R > atr * 3.5:
+                if R <= atr * 0.15:
                     continue
 
-                if R > atr * MAX_STOP_ATR:
+                _extreme_momentum_s = c.get("rvol", 1.0) > 2.0 and c["delta"] < -25000
+                _max_stop = 5.0 if _extreme_momentum_s else MAX_STOP_ATR
+                
+                _base_limit = 5.0 if _extreme_momentum_s else 3.5
+                if R > atr * _base_limit or R > atr * _max_stop:
                     continue
 
                 current_vwap = vwap[i]
