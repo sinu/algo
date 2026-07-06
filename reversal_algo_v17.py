@@ -947,10 +947,8 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                     continue
 
                 _extreme_momentum_s = c.get("rvol", 1.0) > 2.0 and c["delta"] < -25000
-                _max_stop = 5.0 if _extreme_momentum_s else MAX_STOP_ATR
-                
-                _base_limit = 5.0 if _extreme_momentum_s else 3.5
-                if R > atr * _base_limit or R > atr * _max_stop:
+                _max_stop = MAX_STOP_ATR_CASCADE if _extreme_momentum_s else MAX_STOP_ATR
+                if R > atr * 2.5 or R > atr * _max_stop:
                     continue
 
                 current_vwap = vwap[i]
