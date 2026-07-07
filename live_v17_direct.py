@@ -146,7 +146,7 @@ class V17Runner:
         sig_type = {"cascade": "CASCADE", "failed_breakout": "FAILED-BRK",
                     "ceiling_rejection": "CEIL-REJ", "floor_bounce": "FLOOR-BNC",
                     "vwap_pullback": "VWAP-PB", "iceberg_squeeze": "ICE-SQZ",
-                    "dom_sweep_breakout": "DOM-SWP"}.get(_st, "DOUBLE-PUSH")
+                    "dom_sweep_breakout": "DOM-SWP", "trap_rejection": "TRAP-REJ"}.get(_st, "DOUBLE-PUSH")
         print("\n" + "=" * 70)
         print(f"  >>> V17 SIGNAL: {sig['side']} at {sig['time']} [{sig_type}] <<<")
         print(f"  Grade: {sig['grade']} | Score: {sig['score']}")
@@ -180,7 +180,7 @@ class V17Runner:
             for sig in self.signals_fired:
                 sig_type = {"cascade": "C", "failed_breakout": "FB", "ceiling_rejection": "CR",
                             "floor_bounce": "FB", "vwap_pullback": "VP", "iceberg_squeeze": "IS",
-                            "dom_sweep_breakout": "DS"}.get(sig.get("signal_type", ""), "DP")
+                            "dom_sweep_breakout": "DS", "trap_rejection": "TR"}.get(sig.get("signal_type", ""), "DP")
                 print(f"    {sig['time']} {sig['side']:5s} {sig['grade']} "
                       f"Score={sig['score']:2d} Entry={sig['entry']:.2f} "
                       f"Stop={sig['stop']:.2f} Tgt={sig['target']:.2f} [{sig_type}]")

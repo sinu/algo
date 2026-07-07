@@ -603,7 +603,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
     """
     n = len(candles)
     signals = []
-    if n < (7 if live_mode else 10):
+    if n < 7:
         return signals
 
     avg_vol = feats["avg_vol"]
@@ -798,7 +798,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
                                     if R <= atr * 0.1 or R > atr * 2.5:
                                         continue
-                                    if R > atr * MAX_STOP_ATR:
+                                    if R > atr * 1.4:
+                                        continue
+                                    if R > atr * 1.0 and R > 25:
                                         continue
 
                                     current_vwap = vwap[i]
@@ -1029,6 +1031,10 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 if not vwap_support:
                     continue
 
+                _dp_sess_low = min(candles[k]["low"] for k in range(0, i))
+                if entry - _dp_sess_low < atr * 1.3:
+                    continue
+
                 if total_score >= 12:
                     grade = "A+"
                 elif total_score >= 10:
@@ -1130,6 +1136,11 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                         grade = "B"
 
                                     all_reasons = cascade_reasons_s + best_abs_reasons
+
+                                    # Block if target near/below session low (needs range breakout)
+                                    _sess_low_c = min(candles[k]["low"] for k in range(0, i))
+                                    if target < _sess_low_c + atr * 0.5:
+                                        continue
 
                                     # V17: DOM contradiction filter for SHORT cascade
                                     dom_single_net_c = c.get("bid_dom_levels", 0) - c.get("ask_dom_levels", 0)
@@ -1238,6 +1249,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                     continue
 
                                 _sd_target = _sd_entry - _sd_R * TARGET_R
+                                _sd_sess_low = min(candles[k]["low"] for k in range(0, i))
+                                if _sd_entry - _sd_sess_low < _sd_atr * 1.3:
+                                    continue
                                 _sd_grade = "A" if _sd_total >= 9 else "B+" if _sd_total >= 7 else "B"
                                 _sd_all_reasons = _sd_abs_reasons + _sd_p1_reasons + push2_reasons_s + ["stale_distribution"]
 
@@ -1322,6 +1336,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
                                             all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "ceiling_rejection"]
 
+                                            if total_score < 9 and abs(c["delta"]) < 5000:
+                                                continue
+
                                             # Trend filter: block low-score CR on strong trend-up days
                                             _cr_trend_blocked = False
                                             if total_score < 7 and i < 15:
@@ -1329,6 +1346,9 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                             if not _cr_trend_blocked and total_score < 9 and _hhmm >= "13:00":
                                                 _cum_delta_20 = sum(candles[k]["delta"] for k in range(max(0, i - 20), i + 1))
                                                 if _cum_delta_20 > 50000 and _check_short_trend_filter(candles, i, atr):
+                                                    _cr_trend_blocked = True
+                                            if not _cr_trend_blocked and _hhmm >= "14:00":
+                                                if session_range > atr * 5:
                                                     _cr_trend_blocked = True
 
                                             if not _cr_trend_blocked:
@@ -1582,6 +1602,177 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             "signal_type": "dom_sweep_breakout",
                         })
 
+        # === TRY LONG (Trap Rejection — intra-candle absorption) ===
+        if c["delta"] > 0 or c.get("has_dg_l_dg", False) or c.get("floor_abs", 0) > 5000:
+            atr = _compute_atr(candles, i)
+            if atr and atr > 0:
+                for lookback in range(1, 4):
+                    if i - lookback < 0:
+                        break
+                    tc = candles[i - lookback]
+                    tc_spread = tc["high"] - tc["low"]
+                    if tc_spread <= 0:
+                        continue
+                    tc_close_pct = (tc["close"] - tc["low"]) / tc_spread
+                    tc_lower_wick = min(tc["open"], tc["close"]) - tc["low"]
+                    tc_wick_ratio = tc_lower_wick / tc_spread
+                    tc_rvol = tc.get("rvol", 1.0)
+                    tc_delta = tc["delta"]
+                    if (tc_rvol >= 1.5 and
+                        tc_close_pct >= 0.60 and
+                        tc_wick_ratio >= 0.50 and
+                        tc_delta < 0 and
+                        abs(tc_delta) > avg_vol * 0.3 and
+                        (tc_rvol >= 1.8 or tc_close_pct >= 0.75)):
+                        trap_low = tc["low"]
+                        # Trap invalidated if any bar between trap and current broke below trap low
+                        _trap_broken = any(candles[k]["low"] < trap_low for k in range(i - lookback + 1, i))
+                        if _trap_broken:
+                            continue
+                        entry = c["close"]
+                        stop = trap_low - atr * 0.1
+                        risk = entry - stop
+                        if risk <= 0 or risk > atr * 2.0:
+                            continue
+                        if entry <= trap_low:
+                            continue
+                        target = entry + risk * TARGET_R
+                        session_high = max(candles[k]["high"] for k in range(0, i))
+                        if entry >= session_high:
+                            continue
+                        score = 4
+                        reasons = ["trap_rejection"]
+                        if tc_rvol >= 2.0:
+                            score += 2
+                            reasons.append(f"trap_rvol={tc_rvol:.1f}")
+                        else:
+                            score += 1
+                            reasons.append(f"trap_rvol={tc_rvol:.1f}")
+                        if tc_close_pct >= 0.75:
+                            score += 1
+                            reasons.append("strong_recovery")
+                        if c.get("has_dg_l_dg", False):
+                            score += 2
+                            reasons.append("dg_pattern")
+                        if c.get("floor_abs", 0) > 5000:
+                            score += 1
+                            reasons.append(f"floor_abs={c.get('floor_abs',0):.0f}")
+                        if c["delta"] > 0:
+                            score += 1
+                            reasons.append("pos_delta")
+                        if score < min_score:
+                            continue
+                        if score < 9 and risk > atr * MAX_STOP_ATR:
+                            continue
+                        signals.append({
+                            "candle_idx": i,
+                            "time": c.get("time", ""),
+                            "side": "LONG",
+                            "entry": entry,
+                            "stop": stop,
+                            "target": target,
+                            "R": risk,
+                            "score": score,
+                            "grade": "A" if score >= 9 else "B+" if score >= 7 else "B",
+                            "absorption": 0,
+                            "push1_score": 0,
+                            "push2_score": 0,
+                            "reasons": reasons,
+                            "vwap": vwap[i],
+                            "vwap_support": vwap[i] < entry,
+                            "push_rvol": tc_rvol,
+                            "push_dg": 0,
+                            "push_dr": tc.get("local_dr", 0),
+                            "push_delta": tc_delta,
+                            "signal_type": "trap_rejection",
+                        })
+                        break
+
+        # === TRY SHORT (Trap Rejection — intra-candle absorption, bear mirror) ===
+        if c["delta"] < 0 or c.get("has_dr_l_dr", False) or c.get("ceil_abs", 0) > 5000:
+            atr = _compute_atr(candles, i)
+            if atr and atr > 0:
+                for lookback in range(1, 4):
+                    if i - lookback < 0:
+                        break
+                    tc = candles[i - lookback]
+                    tc_spread = tc["high"] - tc["low"]
+                    if tc_spread <= 0:
+                        continue
+                    tc_close_pct = (tc["high"] - tc["close"]) / tc_spread  # close near low = sellers won
+                    tc_upper_wick = tc["high"] - max(tc["open"], tc["close"])
+                    tc_wick_ratio = tc_upper_wick / tc_spread
+                    tc_rvol = tc.get("rvol", 1.0)
+                    tc_delta = tc["delta"]
+                    if (tc_rvol >= 1.5 and
+                        tc_close_pct >= 0.60 and
+                        tc_wick_ratio >= 0.50 and
+                        tc_delta > 0 and
+                        abs(tc_delta) > avg_vol * 0.3 and
+                        (tc_rvol >= 1.8 or tc_close_pct >= 0.75)):
+                        ceil_high = tc["high"]
+                        _ceil_broken = any(candles[k]["high"] > ceil_high for k in range(i - lookback + 1, i))
+                        if _ceil_broken:
+                            continue
+                        entry = c["close"]
+                        stop = ceil_high + atr * 0.1
+                        risk = stop - entry
+                        if risk <= 0 or risk > atr * 2.0:
+                            continue
+                        if entry >= ceil_high:
+                            continue
+                        target = entry - risk * TARGET_R
+                        session_low = min(candles[k]["low"] for k in range(0, i))
+                        if entry <= session_low:
+                            continue
+                        score = 4
+                        reasons = ["trap_rejection"]
+                        if tc_rvol >= 2.0:
+                            score += 2
+                            reasons.append(f"ceil_rvol={tc_rvol:.1f}")
+                        else:
+                            score += 1
+                            reasons.append(f"ceil_rvol={tc_rvol:.1f}")
+                        if tc_close_pct >= 0.75:
+                            score += 1
+                            reasons.append("strong_rejection")
+                        if c.get("has_dr_l_dr", False):
+                            score += 2
+                            reasons.append("dr_pattern")
+                        if c.get("ceil_abs", 0) > 5000:
+                            score += 1
+                            reasons.append(f"ceil_abs={c.get('ceil_abs',0):.0f}")
+                        if c["delta"] < 0:
+                            score += 1
+                            reasons.append("neg_delta")
+                        if score < min_score:
+                            continue
+                        if score < 9 and risk > atr * MAX_STOP_ATR:
+                            continue
+                        signals.append({
+                            "candle_idx": i,
+                            "time": c.get("time", ""),
+                            "side": "SHORT",
+                            "entry": entry,
+                            "stop": stop,
+                            "target": target,
+                            "R": risk,
+                            "score": score,
+                            "grade": "A" if score >= 9 else "B+" if score >= 7 else "B",
+                            "absorption": 0,
+                            "push1_score": 0,
+                            "push2_score": 0,
+                            "reasons": reasons,
+                            "vwap": vwap[i],
+                            "vwap_support": vwap[i] > entry,
+                            "push_rvol": tc_rvol,
+                            "push_dg": 0,
+                            "push_dr": tc.get("local_dg", 0),
+                            "push_delta": tc_delta,
+                            "signal_type": "trap_rejection",
+                        })
+                        break
+
     # === FILTER G: Proximity & Momentum Guards ===
     filtered = []
     for sig in signals:
@@ -1622,12 +1813,16 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
         _g2_side = sig["side"]
         _g2_type = sig.get("signal_type", "")
 
-        # 1. Block cascade (18% WR, no edge)
-        if _g2_type == "cascade":
+        # 1. Block iceberg_squeeze (lowest WR, no edge)
+        if _g2_type == "iceberg_squeeze":
             continue
 
-        # 2. Block LONG near session high when session is NOT trending up
-        #    (chasing high in a flat/weak session)
+        # 2. Block signals with risk > 60pts (wide stops, poor R:R)
+        _g2_risk = abs(sig["entry"] - sig["stop"])
+        if _g2_risk > 60:
+            continue
+
+        # 3. Block LONG near session high when session is NOT trending up
         if _g2_side == "LONG":
             _g2_sh = max(candles[k]["high"] for k in range(0, i + 1))
             _g2_bsh = 0
@@ -1639,8 +1834,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             if _g2_bsh <= 3 and _g2_move < 1.0:
                 continue
 
-        # 3. Block LONG when price dropped > 1.5 ATR in last 5 bars
-        #    (buying into active selling momentum)
+        # 4. Block LONG when price dropped > 1.5 ATR in last 5 bars
         if _g2_side == "LONG":
             _g2_prev_close = candles[max(0, i - 4)]["close"]
             _g2_recent_move = (candles[i]["close"] - _g2_prev_close) / _g2_atr
@@ -1651,41 +1845,57 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
     # === FILTER H: Position Overlap Guard ===
     # Block signals that fire while a prior trade is still active (same side)
+    # Also block same-side re-entry within 2 bars of a prior target hit
     no_overlap = []
-    active_trades = []  # list of (side, entry_idx, exit_idx)
+    active_trades = []  # list of (side, entry_idx, exit_idx, hit_target)
     for sig in sorted(context_filtered, key=lambda s: s["candle_idx"]):
         sig_idx = sig["candle_idx"]
         sig_side = sig["side"]
 
-        # Check if any prior same-side trade is still active
         blocked = False
-        for (t_side, t_entry_idx, t_exit_idx) in active_trades:
+        for (t_side, t_entry_idx, t_exit_idx, t_hit_tgt) in active_trades:
             if t_side == sig_side and sig_idx <= t_exit_idx:
+                blocked = True
+                break
+            if (t_side != sig_side and sig_idx <= t_exit_idx
+                    and sig.get("signal_type") == "trap_rejection"):
+                blocked = True
+                break
+            if t_side == sig_side and t_hit_tgt and sig_idx <= t_exit_idx + 3:
                 blocked = True
                 break
         if blocked:
             continue
 
         # Determine when this trade exits (resolve it)
-        t_exit = sig_idx  # default: same bar (if can't resolve)
+        t_exit = sig_idx
         entry = sig["entry"]
         stop = sig["stop"]
         target = sig["target"]
         max_bars = 15
         n_candles = len(candles)
+        hit_target = False
         for j in range(sig_idx + 1, min(sig_idx + max_bars, n_candles)):
             if sig_side == "LONG":
-                if candles[j]["low"] <= stop or candles[j]["high"] >= target:
+                if candles[j]["high"] >= target:
+                    t_exit = j
+                    hit_target = True
+                    break
+                if candles[j]["low"] <= stop:
                     t_exit = j
                     break
             else:
-                if candles[j]["high"] >= stop or candles[j]["low"] <= target:
+                if candles[j]["low"] <= target:
+                    t_exit = j
+                    hit_target = True
+                    break
+                if candles[j]["high"] >= stop:
                     t_exit = j
                     break
         else:
             t_exit = min(sig_idx + max_bars - 1, n_candles - 1)
 
-        active_trades.append((sig_side, sig_idx, t_exit))
+        active_trades.append((sig_side, sig_idx, t_exit, hit_target))
         no_overlap.append(sig)
 
     return no_overlap
