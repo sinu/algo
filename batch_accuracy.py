@@ -46,7 +46,7 @@ def run_day(date_str, verbose=False):
     results = []
 
     for sig in signals:
-        outcome, r_pnl = evaluate_trade(sig, candles)
+        outcome, r_pnl, *_ = evaluate_trade(sig, candles)
         result = {
             "date": date_str,
             "time": sig.get("time", candles[sig["candle_idx"]].get("time", "")),

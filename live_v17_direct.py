@@ -179,8 +179,9 @@ class V17Runner:
             print(f"\n  All signals:")
             for sig in self.signals_fired:
                 sig_type = {"cascade": "C", "failed_breakout": "FB", "ceiling_rejection": "CR",
-                            "floor_bounce": "FB", "vwap_pullback": "VP", "iceberg_squeeze": "IS",
-                            "dom_sweep_breakout": "DS", "trap_rejection": "TR"}.get(sig.get("signal_type", ""), "DP")
+                            "floor_bounce": "FB", "vwap_pullback": "VP", "vwap_rejection": "VR",
+                            "iceberg_squeeze": "IS", "dom_sweep_breakout": "DS",
+                            "trap_rejection": "TR"}.get(sig.get("signal_type", ""), "DP")
                 print(f"    {sig['time']} {sig['side']:5s} {sig['grade']} "
                       f"Score={sig['score']:2d} Entry={sig['entry']:.2f} "
                       f"Stop={sig['stop']:.2f} Tgt={sig['target']:.2f} [{sig_type}]")
@@ -403,6 +404,7 @@ def main():
             "bid_dom_levels": bid_dom_levels, "ask_dom_levels": ask_dom_levels,
             "book_pressure_ratio": book_pressure_ratio,
             "large_bid_count": large_bid_count, "large_ask_count": large_ask_count,
+            "levels": levels, "level_tags": level_tags if data_rows else [],
         }
 
     def run_cycle(token):

@@ -38,6 +38,18 @@ def run_backtest(algo_module, files, label):
     cascade_trades = 0
     cascade_wins = 0
     cascade_r = 0.0
+    fb_trades = 0
+    fb_wins = 0
+    fb_r = 0.0
+    cr_trades = 0
+    cr_wins = 0
+    cr_r = 0.0
+    fbr_trades = 0
+    fbr_wins = 0
+    fbr_r = 0.0
+
+    fbr_wins, fbr_r = 0, 0.0
+    all_trades = []
 
     monthly_stats = {}
     daily_r_list = []
@@ -54,9 +66,12 @@ def run_backtest(algo_module, files, label):
 
         day_r = 0.0
         for sig in signals:
-            result, r_pnl = algo_module.evaluate_trade(sig, candles)
+            result, r_pnl, *_ = algo_module.evaluate_trade(sig, candles)
             if result == "SKIPPED":
                 continue
+            sig["pnl"] = r_pnl
+            sig["result"] = result
+            all_trades.append(sig)
             total_trades += 1
             total_r += r_pnl
             cum_r += r_pnl
@@ -92,6 +107,21 @@ def run_backtest(algo_module, files, label):
                 cascade_r += r_pnl
                 if is_win:
                     cascade_wins += 1
+            elif sig_type == "floor_bounce":
+                fb_trades += 1
+                fb_r += r_pnl
+                if is_win:
+                    fb_wins += 1
+            elif sig_type == "ceiling_rejection":
+                cr_trades += 1
+                cr_r += r_pnl
+                if is_win:
+                    cr_wins += 1
+            elif sig_type == "failed_breakout":
+                fbr_trades += 1
+                fbr_r += r_pnl
+                if is_win:
+                    fbr_wins += 1
             else:
                 dp_trades += 1
                 dp_r += r_pnl
@@ -110,6 +140,7 @@ def run_backtest(algo_module, files, label):
         daily_r_list.append((date, day_r))
 
     return {
+        "trades": all_trades,
         "label": label,
         "total_trades": total_trades,
         "wins": wins,
@@ -129,6 +160,15 @@ def run_backtest(algo_module, files, label):
         "cascade_trades": cascade_trades,
         "cascade_wins": cascade_wins,
         "cascade_r": cascade_r,
+        "fb_trades": fb_trades,
+        "fb_wins": fb_wins,
+        "fb_r": fb_r,
+        "cr_trades": cr_trades,
+        "cr_wins": cr_wins,
+        "cr_r": cr_r,
+        "fbr_trades": fbr_trades,
+        "fbr_wins": fbr_wins,
+        "fbr_r": fbr_r,
         "monthly_stats": monthly_stats,
         "daily_r_list": daily_r_list,
     }
@@ -164,6 +204,18 @@ def print_results(r):
         cas_wr = r["cascade_wins"] / r["cascade_trades"] * 100
         cas_exp = r["cascade_r"] / r["cascade_trades"]
         print(f"  Cascade:     {r['cascade_trades']} trades | WR {cas_wr:.1f}% | R {r['cascade_r']:+.2f} | Exp {cas_exp:+.3f}")
+    if r["fb_trades"] > 0:
+        fb_wr = r["fb_wins"] / r["fb_trades"] * 100
+        fb_exp = r["fb_r"] / r["fb_trades"]
+        print(f"  Floor Bounce: {r['fb_trades']} trades | WR {fb_wr:.1f}% | R {r['fb_r']:+.2f} | Exp {fb_exp:+.3f}")
+    if r["cr_trades"] > 0:
+        cr_wr = r["cr_wins"] / r["cr_trades"] * 100
+        cr_exp = r["cr_r"] / r["cr_trades"]
+        print(f"  Ceil Reject:  {r['cr_trades']} trades | WR {cr_wr:.1f}% | R {r['cr_r']:+.2f} | Exp {cr_exp:+.3f}")
+    if r["fbr_trades"] > 0:
+        fbr_wr = r["fbr_wins"] / r["fbr_trades"] * 100
+        fbr_exp = r["fbr_r"] / r["fbr_trades"]
+        print(f"  Fail Breakout: {r['fbr_trades']} trades | WR {fbr_wr:.1f}% | R {r['fbr_r']:+.2f} | Exp {fbr_exp:+.3f}")
 
     # Monthly
     print(f"\n  Monthly:")
