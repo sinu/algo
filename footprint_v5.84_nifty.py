@@ -610,6 +610,16 @@ ABSORPTION_MEMORY = 5           # Track absorption zones across N candles
 MULTI_HIT_THRESHOLD = 2         # Min hits at same price for strong zone
 ABSORPTION_WICK_VOL_PCT = 0.25  # Min % of candle vol in lower wick for candle absorption
 
+# 🔥 V5.85 INTRA-CANDLE ABSORPTION (single-candle delta rejection)
+INTRA_ABSORB_MIN_RVOL = 1.5           # Trap candle must have RVOL >= 1.5x (confirms real volume)
+INTRA_ABSORB_MIN_CLOSE_PCT = 0.60     # Close must be in upper 60% of candle (sellers failed)
+INTRA_ABSORB_MIN_WICK_RATIO = 0.50    # Lower wick >= 50% of range (sharp rejection)
+INTRA_ABSORB_SCORE_CREDIT = 2         # Base score boost when intra-candle absorption detected
+INTRA_ABSORB_STRONG_RVOL = 1.5        # Strong: RVOL >= 1.5x
+INTRA_ABSORB_STRONG_CLOSE_PCT = 0.70  # Strong: close in upper 70%
+INTRA_ABSORB_STRONG_WICK_RATIO = 0.60 # Strong: wick >= 60% of range
+INTRA_ABSORB_STRONG_CREDIT = 3        # Score boost for strong intra-candle rejection
+
 # 🔥 V5.17 ADVANCED SCORING THRESHOLDS
 RVOL_ZSCORE_CLIMAX = 2.5
 RVOL_ZSCORE_STRONG = 1.2
@@ -823,6 +833,7 @@ class FootprintRenderer:
         self.delta_history = deque(maxlen=FILTER_LOOKBACK)
         self.volume_history = deque(maxlen=FILTER_LOOKBACK)
         self.trap_age = 0
+        self.trap_candle_ohlc = None              # 🔥 V5.85: Store trap candle OHLC for intra-candle absorption
 
         # 🔥 V5.23: Trap recovery state
         self.trap_broken_age = 0
@@ -884,6 +895,7 @@ class FootprintRenderer:
         self.bear_active_ceiling_price = None
         self.bear_active_ceiling_delta = 0
         self.bear_ceiling_age = 0
+        self.bear_ceiling_candle_ohlc = None      # 🔥 V5.85: Store ceiling candle OHLC for intra-candle absorption
 
         # Bear ceiling recovery state (mirror of trap recovery)
         self.bear_ceiling_broken_age = 0
@@ -1146,6 +1158,29 @@ class FootprintRenderer:
             if abs(z['price'] - trap_price) <= STEP_SIZE * 3
         ]
 
+        # Layer 4: Intra-candle absorption (single-candle delta rejection on trap candle)
+        self.intra_absorb_detected = False
+        intra_absorb_detected = False
+        intra_absorb_strong = False
+        if self.trap_candle_ohlc is not None:
+            tc = self.trap_candle_ohlc
+            tc_spread = tc['high'] - tc['low']
+            if tc_spread > 0:
+                tc_close_pct = (tc['close'] - tc['low']) / tc_spread
+                tc_lower_wick = min(tc['open'], tc['close']) - tc['low']
+                tc_wick_ratio = tc_lower_wick / tc_spread
+                tc_rvol = tc['rvol']
+                if (tc_rvol >= INTRA_ABSORB_MIN_RVOL and
+                    tc_close_pct >= INTRA_ABSORB_MIN_CLOSE_PCT and
+                    tc_wick_ratio >= INTRA_ABSORB_MIN_WICK_RATIO and
+                    tc['delta'] < 0):
+                    intra_absorb_detected = True
+                    self.intra_absorb_detected = True
+                    if (tc_rvol >= INTRA_ABSORB_STRONG_RVOL and
+                        tc_close_pct >= INTRA_ABSORB_STRONG_CLOSE_PCT and
+                        tc_wick_ratio >= INTRA_ABSORB_STRONG_WICK_RATIO):
+                        intra_absorb_strong = True
+
         # Build combined verdict
         evidence = []
         total_score = candle_score
@@ -1160,11 +1195,19 @@ class FootprintRenderer:
             evidence.append(f"Multi({best_multi['hits']}hits @ {best_multi['price']:.2f})")
             total_score += 3
 
+        if intra_absorb_detected:
+            tc = self.trap_candle_ohlc
+            tc_spread = tc['high'] - tc['low']
+            tc_close_pct = (tc['close'] - tc['low']) / tc_spread
+            _intra_credit = INTRA_ABSORB_STRONG_CREDIT if intra_absorb_strong else INTRA_ABSORB_SCORE_CREDIT
+            evidence.append(f"IntraAbsorb(rvol:{tc['rvol']:.1f}x, close:{tc_close_pct:.0%}, wick:{tc_wick_ratio:.0%}, delta:{tc['delta']:.0f})")
+            total_score += _intra_credit
+
         details_str = ", ".join(f"{k}={v}" for k, v in candle_details.items())
         if details_str:
             evidence.append(f"Candle({details_str})")
 
-        # Pass if candle score alone is moderate, OR row/multi absorption present
+        # Pass if candle score alone is moderate, OR row/multi absorption present, OR intra-candle detected
         passed = total_score >= ABSORPTION_SCORE_MOD
 
         if passed:
@@ -1354,6 +1397,27 @@ class FootprintRenderer:
             if abs(z['price'] - ceiling_price) <= STEP_SIZE * 3
         ]
 
+        # Layer 4: Intra-candle absorption (single-candle delta rejection on ceiling candle)
+        bear_intra_absorb_detected = False
+        bear_intra_absorb_strong = False
+        if self.bear_ceiling_candle_ohlc is not None:
+            bc = self.bear_ceiling_candle_ohlc
+            bc_spread = bc['high'] - bc['low']
+            if bc_spread > 0:
+                bc_close_pct = (bc['high'] - bc['close']) / bc_spread  # close near LOW = sellers won
+                bc_upper_wick = bc['high'] - max(bc['open'], bc['close'])
+                bc_wick_ratio = bc_upper_wick / bc_spread
+                bc_rvol = bc['rvol']
+                if (bc_rvol >= INTRA_ABSORB_MIN_RVOL and
+                    bc_close_pct >= INTRA_ABSORB_MIN_CLOSE_PCT and
+                    bc_wick_ratio >= INTRA_ABSORB_MIN_WICK_RATIO and
+                    bc['delta'] > 0):
+                    bear_intra_absorb_detected = True
+                    if (bc_rvol >= INTRA_ABSORB_STRONG_RVOL and
+                        bc_close_pct >= INTRA_ABSORB_STRONG_CLOSE_PCT and
+                        bc_wick_ratio >= INTRA_ABSORB_STRONG_WICK_RATIO):
+                        bear_intra_absorb_strong = True
+
         # Build combined verdict
         evidence = []
         total_score = candle_score
@@ -1368,11 +1432,21 @@ class FootprintRenderer:
             evidence.append(f"Multi({best_multi['hits']}hits @ {best_multi['price']:.2f})")
             total_score += 3
 
+        if bear_intra_absorb_detected:
+            bc = self.bear_ceiling_candle_ohlc
+            bc_spread = bc['high'] - bc['low']
+            bc_close_pct = (bc['high'] - bc['close']) / bc_spread
+            bc_upper_wick = bc['high'] - max(bc['open'], bc['close'])
+            bc_wick_ratio = bc_upper_wick / bc_spread
+            _intra_credit = INTRA_ABSORB_STRONG_CREDIT if bear_intra_absorb_strong else INTRA_ABSORB_SCORE_CREDIT
+            evidence.append(f"IntraAbsorb(rvol:{bc['rvol']:.1f}x, close:{bc_close_pct:.0%}, wick:{bc_wick_ratio:.0%}, delta:+{bc['delta']:.0f})")
+            total_score += _intra_credit
+
         details_str = ", ".join(f"{k}={v}" for k, v in candle_details.items())
         if details_str:
             evidence.append(f"Candle({details_str})")
 
-        # Pass if candle score alone is moderate, OR row/multi absorption present
+        # Pass if candle score alone is moderate, OR row/multi absorption present, OR intra-candle detected
         passed = total_score >= ABSORPTION_SCORE_MOD
 
         if passed:
@@ -2558,6 +2632,12 @@ class FootprintRenderer:
                     self.active_trap_price = block_price
                     self.active_trap_delta = cluster_delta
                     self.trap_age = 0
+                    self.trap_candle_ohlc = {
+                        'open': ohlc_open, 'high': ohlc_high,
+                        'low': ohlc_low, 'close': ohlc_close,
+                        'vol': total_vol_candle, 'delta': total_delta_candle,
+                        'rvol': rvol_ratio if rvol_ratio else 0,
+                    }
                     self.trap_broken_age = 0  # 🔥 V5.23: Reset recovery state on new trap
                     self.trap_break_low = None
                     self.trap_recovered = False
@@ -2990,6 +3070,9 @@ class FootprintRenderer:
                     elif not rvol_gate_passed and override_allowed:  # 🔥 V5.53: override = exhaust+extreme D2+RVOL/trend
                         rvol_gate_passed = True
                         debug_trap_logs.append(f"[RVOL-GATE] ⚠ local:{local_rvol:.2f}x < {MIN_SIGNAL_RVOL}x, BYPASSED: Override (session:{rvol_ratio:.2f}x)")
+                    elif not rvol_gate_passed and self.intra_absorb_detected and absorb_score >= ABSORPTION_SCORE_MOD:
+                        rvol_gate_passed = True
+                        debug_trap_logs.append(f"[RVOL-GATE] ⚠ local:{local_rvol:.2f}x < {MIN_SIGNAL_RVOL}x, BYPASSED: Intra-candle absorption (trap RVOL:{self.trap_candle_ohlc['rvol']:.1f}x)")
                     elif not rvol_gate_passed:
                         debug_trap_logs.append(f"[RVOL-GATE] ✗ local:{local_rvol:.2f}x < {MIN_SIGNAL_RVOL}x (session:{rvol_ratio:.2f}x)")
                     else:
@@ -3021,9 +3104,11 @@ class FootprintRenderer:
                     debug_trap_logs.append(f"[GOLDEN] {golden_status}")
 
                     # 🔥 V5.62: TREND-EXHAUST — tightened, only GOLDEN bypasses on trend days
+                    # 🔥 V5.85: Intra-candle absorption also bypasses (trap candle rejection = proven defense)
                     # Climax alone no longer sufficient — GOLDEN required to counter any trend-day exhaust
+                    _intra_absorb_bypass = (self.intra_absorb_detected and absorb_score >= ABSORPTION_SCORE_MOD)
                     trend_exhaust_blocked = False
-                    if (not is_golden and
+                    if (not is_golden and not _intra_absorb_bypass and
                         self.last_range_ratio is not None and
                         self.last_range_ratio >= TREND_EXHAUST_MIN_RANGE_ATR and
                         exhaust_passed and (
@@ -3051,6 +3136,8 @@ class FootprintRenderer:
                             te_reason.append(f"RVOL-ok({rvol_ratio:.2f}x)")
                         if is_golden:
                             te_reason.append("golden")
+                        if _intra_absorb_bypass:
+                            te_reason.append("intra-absorb")
                         debug_trap_logs.append(f"[TREND-EXHAUST] ✓ Passed ({', '.join(te_reason)})")
 
                     # 🔥 V5.31: GRADE C + CONSOLIDATION BLOCK
@@ -3364,6 +3451,12 @@ class FootprintRenderer:
                     self.bear_active_ceiling_price = block_price
                     self.bear_active_ceiling_delta = ceil_cluster_delta
                     self.bear_ceiling_age = 0
+                    self.bear_ceiling_candle_ohlc = {
+                        'open': ohlc_open, 'high': ohlc_high,
+                        'low': ohlc_low, 'close': ohlc_close,
+                        'vol': total_vol_candle, 'delta': total_delta_candle,
+                        'rvol': rvol_ratio if rvol_ratio else 0,
+                    }
                     self.bear_ceiling_broken_age = 0
                     self.bear_ceiling_break_high = None
                     self.bear_ceiling_recovered = False

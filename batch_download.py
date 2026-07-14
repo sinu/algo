@@ -355,8 +355,8 @@ def main():
         start_date = datetime.strptime(sys.argv[1], '%Y-%m-%d').date()
         end_date = datetime.strptime(sys.argv[2], '%Y-%m-%d').date()
     else:
-        start_date = date(2025, 12, 3)
-        end_date = date(2026, 6, 23)
+        start_date = date(2025, 6, 9)
+        end_date = date(2026, 7, 14)
 
     market_days = get_market_days(start_date, end_date)
     print(f"Batch download: {start_date} to {end_date}")

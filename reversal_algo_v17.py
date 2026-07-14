@@ -739,7 +739,17 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         # === TRY LONG (standard double-push) ===
         is_push2_long, push2_score_l, push2_reasons_l = _is_push_candle_long(c, avg_vol)
-        if is_push2_long and push2_score_l >= 3:
+
+        # Trap-bounce exception: allow push2_score==2 with strict evidence
+        _trap_bounce_entry = False
+        if is_push2_long and push2_score_l == 2 and push2_score_l < 3:
+            _c_range_tb = c["high"] - c["low"] if c["high"] > c["low"] else 1
+            _close_pct_tb = (c["close"] - c["low"]) / _c_range_tb
+            _cum_sell_tb = sum(candles[k]["delta"] for k in range(max(0, i - 8), i) if candles[k]["delta"] < 0)
+            if _close_pct_tb >= 0.95 and c["delta"] > 0 and _cum_sell_tb < -10000:
+                _trap_bounce_entry = True
+
+        if is_push2_long and (push2_score_l >= 3 or _trap_bounce_entry):
             atr = _compute_atr(candles, i)
 
             # PEAK guard: block LONG when making new session high (breakout, not reversal)
@@ -750,19 +760,19 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 and c.get("rvol", 1.0) > 2.0
                 and vwap[i] < c["close"]
             )
-            
+
             session_low = min(candles[k]["low"] for k in range(0, i + 1))
             session_range = session_high - session_low
             entry_depth = (session_high - c["close"]) / session_range if session_range > 0 else 0
-            
+
             _is_blocked = False
             if c["high"] >= session_high and not _peak_momentum_bypass:
                 _is_blocked = True
-            elif not _peak_momentum_bypass and entry_depth < 0.15:
+            elif not _peak_momentum_bypass and not _trap_bounce_entry and entry_depth < 0.15:
                 _is_blocked = True
-            elif not _peak_momentum_bypass and c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
+            elif not _peak_momentum_bypass and not _trap_bounce_entry and c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
                 _is_blocked = True
-                
+
             if _is_blocked:
                 pass
             else:
@@ -838,6 +848,16 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
                             all_reasons = abs_reasons + push1_reasons_l + push2_reasons_l
 
+                            # Block LONG into active ceiling:
+                            # Green push candle (DG>=3, delta>0) during active ceiling
+                            _ceil_active = (c.get("ceil_status", "") != ""
+                                            or c.get("ceil_abs", 0) > 0)
+                            _pushing_into_ceil = (_ceil_active
+                                                  and c.get("local_dg", 0) >= 3
+                                                  and c["delta"] > 0)
+                            if _pushing_into_ceil and total_score < 9 and not _trap_bounce_entry:
+                                continue
+
                             signals.append({
                                 "side": "LONG",
                                 "candle_idx": i,
@@ -861,6 +881,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                 "push_dr": 0,
                                 "push_delta": c["delta"],
                                 "signal_type": "double_push",
+                                "trap_bounce": _trap_bounce_entry,
                             })
                             break
 
@@ -921,6 +942,11 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                     if R > atr * 1.4:
                                         continue
                                     if R > atr * 1.0 and R > 25:
+                                        continue
+                                    if R >= 20:
+                                        continue
+                                    _fb_time = c.get("time", "")
+                                    if _fb_time >= "14:00":
                                         continue
 
                                     current_vwap = vwap[i]
@@ -1195,11 +1221,15 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                     continue
 
                 entry = _get_ref_price(c)
-                recent_high = max(candles[k]["high"] for k in range(max(0, p1_idx - 5), p1_idx + 1))
+                _swing_high = max(candles[k]["high"] for k in range(p1_idx, i + 1))
+                _lookback_high = max(candles[k]["high"] for k in range(max(0, p1_idx - 5), p1_idx + 1))
+                recent_high = min(_swing_high, _lookback_high)
                 stop = recent_high + atr * 0.2
                 R = stop - entry
 
                 if R <= atr * 0.15:
+                    continue
+                if R > 30:
                     continue
 
                 _extreme_momentum_s = c.get("rvol", 1.0) > 2.0 and c["delta"] < -25000
@@ -1464,11 +1494,10 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                 })
                                 break
 
-        # === TRY SHORT (ceiling rejection) ===
-        # Mirror of floor_bounce for LONG: first selling at session high with absorption
         # No double-push needed — the ceiling rejection IS the signal
         if not any(s["candle_idx"] == i and s["side"] == "SHORT" for s in signals):
-            _has_ceil = c.get("ceil_abs", 0) > 0
+            _has_ceil = c.get("ceil_abs", 0) > 0 or (i > 0 and candles[i-1].get("ceil_abs", 0) > 0)
+
             _dr_strong = c.get("local_dr", 0) >= 3
             _cr_ceil_only = _has_ceil and not _dr_strong
             if c["delta"] < 0 and (_dr_strong or _has_ceil):
@@ -1485,15 +1514,29 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                     _cr_trend_up_block = _cr_cum_delta > 150000 and _cr_early_session
                     _cr_over_extended = session_range > 10.0 * atr
 
-                    # Must be near session high (upper 30% of range)
+                    # Allow either Session High rejection or VWAP test rejection
                     entry_height = (c["close"] - session_low) / session_range if session_range > 0 else 0.5
-                    if entry_height >= 0.70 and not (_cr_ceil_only and (_cr_trend_up_block or _cr_over_extended)):
-                        # Session high must have been made within last 3 candles
+                    current_vwap = vwap[i]
+
+                    _near_session_high = entry_height >= 0.70 and not (_cr_ceil_only and (_cr_trend_up_block or _cr_over_extended))
+                    _near_vwap = abs(c["high"] - current_vwap) < atr * 1.5 and c["high"] >= current_vwap - atr * 0.5
+
+                    if _near_session_high or _near_vwap:
                         high_maker_idx = max(range(0, i + 1), key=lambda k: candles[k]["high"])
-                        if i - high_maker_idx <= 2:
+                        _is_session_high_recent = (i - high_maker_idx <= 2)
+
+                        _is_vwap_rejection = False
+                        _local_high = session_high
+                        if _near_vwap and not _is_session_high_recent:
+                            local_high_idx = max(range(max(0, i - 7), i + 1), key=lambda k: candles[k]["high"])
+                            if i - local_high_idx <= 2:
+                                _is_vwap_rejection = True
+                                _local_high = candles[local_high_idx]["high"]
+
+                        if _is_session_high_recent or _is_vwap_rejection:
                             # NOT making new session low
                             _local_lows = [candles[k]["low"] for k in range(max(0, i - 6), i)]
-                            _not_new_low = c["low"] > min(_local_lows) if _local_lows else False
+                            _not_new_low = c["low"] >= min(_local_lows) if _local_lows else False
                             if _not_new_low:
                                 # Buyer absorption confirmation (buyers tried, got absorbed)
                                 abs_atr = _compute_atr(candles, i)
@@ -1501,17 +1544,30 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                 if abs_score >= 3 or _has_ceil:
                                     abs_score = max(abs_score, 3 if _has_ceil else 0)
                                     entry = _get_ref_price(c)
-                                    stop = session_high + atr * 0.2
+                                    stop = _local_high + atr * 0.2
                                     R = stop - entry
 
-                                    if R > atr * 0.15 and R <= atr * 1.6:
+                                    if R > atr * 0.15 and R <= atr * 2.0:
                                         current_vwap = vwap[i]
-                                        if current_vwap < entry:
-                                            target = entry - R * TARGET_R
-                                            if target < current_vwap:
-                                                continue
+                                        _valid_target = True
 
-                                            total_score = abs_score + 1 + c.get("local_dr", 0) // 2
+                                        target = entry - R * TARGET_R
+                                        if not _is_vwap_rejection:
+                                            # Original mean-reversion logic
+                                            if current_vwap >= entry:
+                                                _valid_target = False
+                                            elif target < current_vwap:
+                                                _valid_target = False
+                                        else:
+                                            # VWAP rejection: block if entry is far above VWAP
+                                            # Use min 3pts buffer to handle tight-R cases
+                                            _vr_buffer = max(R * 0.3, 3.0)
+                                            if entry > current_vwap + _vr_buffer and target < current_vwap:
+                                                _valid_target = False
+                                                
+                                        if _valid_target:
+                                            vwap_bonus = 3 if _is_vwap_rejection else 0
+                                            total_score = abs_score + 1 + c.get("local_dr", 0) // 2 + vwap_bonus
                                             if total_score >= 9:
                                                 grade = "A"
                                             elif total_score >= 7:
@@ -1519,11 +1575,13 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                             else:
                                                 grade = "B"
 
-                                            all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "ceiling_rejection"]
+                                            all_reasons = abs_reasons + [f"dr={c.get('local_dr',0)}", "vwap_rej" if _is_vwap_rejection else "ceiling_rej"]
 
                                             if total_score < 6:
                                                 continue
                                             if total_score < 9 and abs(c["delta"]) < 5000:
+                                                continue
+                                            if _is_vwap_rejection and total_score < 9 and R > 25:
                                                 continue
 
                                             # Trend filter: block low-score CR on strong trend-up days
@@ -1586,7 +1644,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             _fb_entry = c.get("poc") or (c["high"] + c["low"]) / 2.0
                             _fb_stop = max(_prior["high"], c["high"]) + _fb_atr * 0.2
                             _fb_R = _fb_stop - _fb_entry
-                            if _fb_R > _fb_atr * 0.15 and _fb_R <= _fb_atr * 2.5:
+                            if _fb_R > _fb_atr * 0.15 and _fb_R <= _fb_atr * 2.5 and _fb_R <= 40:
                                 _fb_cum = sum(candles[k]["delta"] for k in range(0, i + 1))
                                 _fb_trend_block = _fb_cum > 200000
                                 if _fb_trend_block:
@@ -1879,6 +1937,10 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             reasons.append("pos_delta")
                         if score < min_score:
                             continue
+                        if score <= 7:
+                            continue
+                        if risk > 40:
+                            continue
                         if score < 9 and risk > atr * MAX_STOP_ATR:
                             continue
                         if vwap[i] > entry and target > vwap[i]:
@@ -1966,6 +2028,10 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             reasons.append("neg_delta")
                         if score < min_score:
                             continue
+                        if score <= 7:
+                            continue
+                        if risk > 40:
+                            continue
                         if score < 9 and risk > atr * MAX_STOP_ATR:
                             continue
                         signals.append({
@@ -2014,7 +2080,7 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             _g_sl = min(candles[k]["low"] for k in range(0, i + 1))
             _g_sr = _g_sh - _g_sl
             _g_room = (_g_sh - sig["entry"]) / _g_atr
-            if _g_room < 2.0 and _g_sr > 6.0 * _g_atr and sig.get("signal_type") != "floor_bounce":
+            if _g_room < 2.0 and _g_sr > 6.0 * _g_atr and sig.get("signal_type") != "floor_bounce" and not sig.get("trap_bounce"):
                 continue
 
         filtered.append(sig)

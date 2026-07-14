@@ -31,8 +31,9 @@ LIVE_SCRIPT = os.path.join(SCRIPT_DIR, "live_v17_direct.py")
 
 SIG_TYPE_MAP = {
     "C": "cascade", "DP": "double_push", "CR": "ceiling_rejection",
-    "FB": "floor_bounce", "VP": "vwap_pullback", "IS": "iceberg_squeeze",
-    "DS": "dom_sweep_breakout", "TR": "trap_rejection"
+    "FB": "floor_bounce", "FR": "floor_rejection", "VP": "vwap_pullback",
+    "VR": "vwap_rejection", "IS": "iceberg_squeeze", "DS": "dom_sweep_breakout",
+    "TR": "trap_rejection"
 }
 
 

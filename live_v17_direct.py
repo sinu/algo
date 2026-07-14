@@ -145,8 +145,9 @@ class V17Runner:
         _st = sig.get("signal_type", "")
         sig_type = {"cascade": "CASCADE", "failed_breakout": "FAILED-BRK",
                     "ceiling_rejection": "CEIL-REJ", "floor_bounce": "FLOOR-BNC",
-                    "vwap_pullback": "VWAP-PB", "iceberg_squeeze": "ICE-SQZ",
-                    "dom_sweep_breakout": "DOM-SWP", "trap_rejection": "TRAP-REJ"}.get(_st, "DOUBLE-PUSH")
+                    "floor_rejection": "FLOOR-REJ", "vwap_pullback": "VWAP-PB",
+                    "iceberg_squeeze": "ICE-SQZ", "dom_sweep_breakout": "DOM-SWP",
+                    "trap_rejection": "TRAP-REJ"}.get(_st, "DOUBLE-PUSH")
         print("\n" + "=" * 70)
         print(f"  >>> V17 SIGNAL: {sig['side']} at {sig['time']} [{sig_type}] <<<")
         print(f"  Grade: {sig['grade']} | Score: {sig['score']}")
@@ -179,7 +180,8 @@ class V17Runner:
             print(f"\n  All signals:")
             for sig in self.signals_fired:
                 sig_type = {"cascade": "C", "failed_breakout": "FB", "ceiling_rejection": "CR",
-                            "floor_bounce": "FB", "vwap_pullback": "VP", "vwap_rejection": "VR",
+                            "floor_bounce": "FB", "floor_rejection": "FR",
+                            "vwap_pullback": "VP", "vwap_rejection": "VR",
                             "iceberg_squeeze": "IS", "dom_sweep_breakout": "DS",
                             "trap_rejection": "TR"}.get(sig.get("signal_type", ""), "DP")
                 print(f"    {sig['time']} {sig['side']:5s} {sig['grade']} "
@@ -374,7 +376,18 @@ def main():
                             break
 
         floor_abs = getattr(renderer_inst, 'bottom_absorb_cumul', 0) if getattr(renderer_inst, 'bottom_absorb_streak', 0) >= 2 else 0
+        # Active floor from renderer (floor_confirmed is sticky until trap resets)
+        _floor_confirmed = getattr(renderer_inst, 'floor_confirmed', False)
+        _active_trap_price = getattr(renderer_inst, 'active_trap_price', None)
+        if _floor_confirmed and _active_trap_price and l <= _active_trap_price + 5.0:
+            floor_abs = max(floor_abs, getattr(renderer_inst, 'bottom_absorb_cumul', 1))
         ceil_abs = getattr(renderer_inst, 'bear_top_absorb_cumul', 0) if getattr(renderer_inst, 'bear_top_absorb_streak', 0) >= 2 else 0
+        # Active ceiling from renderer (even if absorption streak < 2)
+        _active_ceil_price = getattr(renderer_inst, 'bear_active_ceiling_price', None)
+        _ceil_age = getattr(renderer_inst, 'bear_ceiling_age', 999)
+        if _active_ceil_price and _ceil_age <= 20 and h >= _active_ceil_price - 5.0:
+            ceil_abs = max(ceil_abs, getattr(renderer_inst, 'bear_active_ceiling_delta', 1))
+        ceil_status = "CEIL ACTIVE" if (_active_ceil_price and _ceil_age <= 20) else ""
         multi_absorb = 0
         if hasattr(renderer_inst, 'absorption_zones'):
             multi_absorb = sum(1 for z in renderer_inst.absorption_zones.values()
@@ -399,7 +412,7 @@ def main():
             "volume": vol, "delta": delta, "rvol": rvol, "poc": poc,
             "local_dg": local_dg, "local_dr": local_dr,
             "has_dg_l_dg": has_dg_l_dg, "has_dr_l_dr": has_dr_l_dr,
-            "floor_abs": floor_abs, "ceil_abs": ceil_abs,
+            "floor_abs": floor_abs, "ceil_abs": ceil_abs, "ceil_status": ceil_status,
             "is_churn": is_churn, "multi_absorb": multi_absorb,
             "bid_dom_levels": bid_dom_levels, "ask_dom_levels": ask_dom_levels,
             "book_pressure_ratio": book_pressure_ratio,
@@ -526,7 +539,7 @@ def main():
     sys.stdout = AlertFilter(sys.stdout)
 
     # First cycle — silent mode only for live (today), print signals for backtest dates
-    is_live = (target_date == datetime.now().strftime('%Y-%m-%d'))
+    is_live = (target_date == datetime.now().strftime('%Y-%m-%d')) and not os.environ.get("V17_FORCE_BT")
     if is_live:
         v17_runner.silent = True
     print("  Running initial cycle...")
@@ -541,6 +554,16 @@ def main():
     # For backtest dates (past), print summary and exit immediately
     if not is_live:
         v17_runner.print_summary()
+        if os.environ.get("V17_DUMP_CANDLES"):
+            import json as _json
+            _dump = []
+            for _c in v17_runner.candles:
+                _cd = dict(_c)
+                _cd["levels"] = [[p, b, a] for p, b, a in _cd.get("levels", [])]
+                _dump.append(_cd)
+            with open(os.environ["V17_DUMP_CANDLES"], "w") as _f:
+                _json.dump(_dump, _f, indent=2, default=str)
+            print(f"  Candle data dumped to {os.environ['V17_DUMP_CANDLES']}")
         return
 
     try:
