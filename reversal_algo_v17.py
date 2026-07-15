@@ -858,6 +858,19 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             if _pushing_into_ceil and total_score < 9 and not _trap_bounce_entry:
                                 continue
 
+                            # Seller absorption counter-signal: close near low + strong ask DOM
+                            _spread_l = c["high"] - c["low"]
+                            if _spread_l > 0:
+                                _close_pos_l = (c["close"] - c["low"]) / _spread_l
+                                if _close_pos_l < 0.4 and c.get("ask_dom_levels", 0) >= 4:
+                                    continue
+
+                            # Swing proximity filter: block low-vol entries near resistance needing breakout
+                            _swing_high_dp = max(candles[k]["high"] for k in range(p1_idx, i + 1))
+                            _room_to_swing_l = (_swing_high_dp - entry) / R if R > 0 else 999
+                            if target > _swing_high_dp and _room_to_swing_l < 0.3 and c.get("rvol", 1.0) <= 0.5:
+                                continue
+
                             signals.append({
                                 "side": "LONG",
                                 "candle_idx": i,
@@ -884,6 +897,122 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                 "trap_bounce": _trap_bounce_entry,
                             })
                             break
+
+        # === TRY LONG (deep pullback recovery) ===
+        # Captures trending-day pullbacks where push1 is >3 bars back or V-bounce from selloff
+        if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
+            if is_push2_long and push2_score_l >= 3:
+                atr = _compute_atr(candles, i)
+                if atr > 0:
+                    session_high = max(candles[k]["high"] for k in range(0, i))
+                    session_low = min(candles[k]["low"] for k in range(0, i + 1))
+                    session_range = session_high - session_low
+                    if session_range > 0:
+                        entry_depth = (session_high - c["close"]) / session_range
+                        _dpr_peak_bypass = (c["high"] >= session_high and c["delta"] > 80000
+                                            and c.get("rvol", 1.0) > 2.0 and vwap[i] < c["close"])
+                        _dpr_blocked = False
+                        if c["high"] >= session_high and not _dpr_peak_bypass:
+                            _dpr_blocked = True
+                        elif not _dpr_peak_bypass and entry_depth < 0.15:
+                            _dpr_blocked = True
+                        elif not _dpr_peak_bypass and c["high"] >= max(candles[k]["high"] for k in range(max(0, i - 6), i)):
+                            _dpr_blocked = True
+
+                        if not _dpr_blocked:
+                            # Verify no push1 within gap=3 (standard DP would handle)
+                            _dpr_has_gap3 = False
+                            for _dpr_gap in range(1, 4):
+                                _dpr_p1i = i - _dpr_gap
+                                if _dpr_p1i < 5:
+                                    break
+                                if candles[_dpr_p1i]["delta"] <= 0:
+                                    continue
+                                _dpr_between = candles[_dpr_p1i + 1:i]
+                                if any(x["delta"] < -15000 for x in _dpr_between):
+                                    continue
+                                _dpr_has_gap3 = True
+                                break
+
+                            if not _dpr_has_gap3:
+                                # Extended gap search (4-8)
+                                _dpr_p1_found = None
+                                for _dpr_gap in range(4, 9):
+                                    _dpr_p1i = i - _dpr_gap
+                                    if _dpr_p1i < 3:
+                                        break
+                                    _dpr_p1c = candles[_dpr_p1i]
+                                    if _dpr_p1c["delta"] <= 0:
+                                        continue
+                                    _, _dpr_p1_score, _ = _is_push_candle_long(_dpr_p1c, avg_vol)
+                                    if _dpr_p1_score >= 2:
+                                        _dpr_p1_found = (_dpr_p1i, _dpr_p1_score)
+                                        break
+
+                                # Single push context (V-bounce from selloff)
+                                _dpr_cum5 = sum(candles[k]["delta"] for k in range(max(0, i - 5), i))
+                                _dpr_neg5 = sum(1 for k in range(max(0, i - 5), i) if candles[k]["delta"] < 0)
+                                _dpr_is_single = push2_score_l >= 5 and _dpr_cum5 < -10000 and _dpr_neg5 >= 3
+                                _dpr_is_extended = _dpr_p1_found is not None
+
+                                # Quality gate: absorption or aggression
+                                _dpr_abs_atr = _compute_atr(candles, max(0, i - 2))
+                                _dpr_abs_score, _dpr_abs_reasons = _detect_seller_absorption(candles, i, _dpr_abs_atr)
+                                _dpr_has_aggr = c.get("has_dg_l_dg", False) or c.get("local_dg", 0) >= 3
+                                _dpr_has_quality = _dpr_abs_score >= 3 or _dpr_has_aggr
+
+                                # Path A: deep recovery (depth >= 0.25 + quality)
+                                _dpr_path_a = entry_depth >= 0.25 and _dpr_has_quality and (_dpr_is_extended or _dpr_is_single)
+                                # Path B: strong push1 (depth >= 0.15 + quality + p1_score >= 4)
+                                _dpr_path_b = (entry_depth >= 0.15 and _dpr_has_quality
+                                               and _dpr_p1_found is not None and _dpr_p1_found[1] >= 4)
+
+                                if _dpr_path_a or _dpr_path_b:
+                                    entry = _get_ref_price(c)
+                                    _dpr_recent_low = min(candles[k]["low"] for k in range(max(0, i - 5), i + 1))
+                                    _dpr_pre_low = candles[max(0, i - 6)]["low"]
+                                    stop = min(_dpr_recent_low, _dpr_pre_low) - atr * 0.1
+                                    R = entry - stop
+
+                                    if R > atr * 0.1 and R <= atr * 2.5:
+                                        target = entry + R * TARGET_R
+                                        current_vwap = vwap[i]
+
+                                        if not (current_vwap > entry and target > current_vwap):
+                                            _dpr_init = push2_score_l + (_dpr_p1_found[1] // 2 if _dpr_p1_found else 0)
+                                            _dpr_total = _dpr_init + _dpr_abs_score
+                                            if _dpr_total >= 9:
+                                                grade = "A"
+                                            elif _dpr_total >= 7:
+                                                grade = "B+"
+                                            else:
+                                                grade = "B"
+
+                                            signals.append({
+                                                "side": "LONG",
+                                                "candle_idx": i,
+                                                "push1_idx": _dpr_p1_found[0] if _dpr_p1_found else i,
+                                                "time": c.get("time", ""),
+                                                "entry": entry,
+                                                "stop": stop,
+                                                "target": target,
+                                                "R": R,
+                                                "score": _dpr_total,
+                                                "grade": grade,
+                                                "initiative_score": _dpr_init,
+                                                "abs_score": _dpr_abs_score,
+                                                "push1_score": _dpr_p1_found[1] if _dpr_p1_found else 0,
+                                                "push2_score": push2_score_l,
+                                                "reasons": _dpr_abs_reasons,
+                                                "vwap": current_vwap,
+                                                "vwap_support": current_vwap < entry,
+                                                "push_rvol": c.get("rvol", 1.0),
+                                                "push_dg": c.get("local_dg", 0),
+                                                "push_dr": 0,
+                                                "push_delta": c["delta"],
+                                                "signal_type": "double_push",
+                                                "trap_bounce": False,
+                                            })
 
         # === TRY LONG (absorption-confirmed bounce) ===
         # Narrow path: floor_abs on signal candle + NOT making new local low = bounce confirmed
@@ -964,6 +1093,10 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                         grade = "B+"
                                     else:
                                         grade = "B"
+
+                                    # Require buyer aggression on signal candle (DG >= 3 or DG-L-DG)
+                                    if c.get("local_dg", 0) < 3 and not c.get("has_dg_l_dg", False):
+                                        continue
 
                                     all_reasons = abs_reasons + push1_reasons_l + ["floor_bounce"]
                                     signals.append({
@@ -1268,6 +1401,19 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 if dom_single_net <= 0 and dom_cum_net <= 0:
                     continue
 
+                # Buyer absorption counter-signal: close recovered to upper range + strong bid DOM
+                _spread_s = c["high"] - c["low"]
+                if _spread_s > 0:
+                    _close_pos_s = (c["close"] - c["low"]) / _spread_s
+                    if _close_pos_s > 0.6 and c.get("bid_dom_levels", 0) >= 4:
+                        continue
+
+                # Swing proximity filter: block low-vol entries near support needing breakdown
+                _swing_low_dp = min(candles[k]["low"] for k in range(p1_idx, i + 1))
+                _room_to_swing_s = (entry - _swing_low_dp) / R if R > 0 else 999
+                if target < _swing_low_dp and _room_to_swing_s < 0.3 and c.get("rvol", 1.0) <= 0.5:
+                    continue
+
                 signals.append({
                     "side": "SHORT",
                     "candle_idx": i,
@@ -1294,9 +1440,117 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                 })
                 break
 
-        # === TRY SHORT (multi-bar cascade) ===
-        # Only if standard push didn't already fire on this bar
-        if not (is_push2_short and push2_score_s >= 3):
+        # === TRY SHORT (deep pullback recovery) ===
+        # Captures trending-day rallies where push1 is >3 bars back or V-bounce from rally
+        if not any(s["candle_idx"] == i and s["side"] == "SHORT" for s in signals):
+            if is_push2_short and push2_score_s >= 3:
+                atr = _compute_atr(candles, i)
+                if atr > 0:
+                    session_high = max(candles[k]["high"] for k in range(0, i + 1))
+                    session_low = min(candles[k]["low"] for k in range(0, i))
+                    session_range = session_high - session_low
+                    if session_range > 0:
+                        entry_depth_s = (c["close"] - session_low) / session_range
+                        _dpr_trough_bypass = (c["low"] <= session_low and abs(c["delta"]) > 80000
+                                              and c.get("rvol", 1.0) > 2.0 and vwap[i] > c["close"])
+                        _dpr_s_blocked = False
+                        if c["low"] <= session_low and not _dpr_trough_bypass:
+                            _dpr_s_blocked = True
+                        elif not _dpr_trough_bypass and entry_depth_s < 0.15:
+                            _dpr_s_blocked = True
+                        elif not _dpr_trough_bypass and c["low"] <= min(candles[k]["low"] for k in range(max(0, i - 6), i)):
+                            _dpr_s_blocked = True
+
+                        if not _dpr_s_blocked:
+                            _dpr_s_has_gap3 = False
+                            for _dpr_s_gap in range(1, 4):
+                                _dpr_s_p1i = i - _dpr_s_gap
+                                if _dpr_s_p1i < 5:
+                                    break
+                                if candles[_dpr_s_p1i]["delta"] >= 0:
+                                    continue
+                                _dpr_s_between = candles[_dpr_s_p1i + 1:i]
+                                if any(x["delta"] > 15000 for x in _dpr_s_between):
+                                    continue
+                                _dpr_s_has_gap3 = True
+                                break
+
+                            if not _dpr_s_has_gap3:
+                                _dpr_s_p1_found = None
+                                for _dpr_s_gap in range(4, 9):
+                                    _dpr_s_p1i = i - _dpr_s_gap
+                                    if _dpr_s_p1i < 3:
+                                        break
+                                    _dpr_s_p1c = candles[_dpr_s_p1i]
+                                    if _dpr_s_p1c["delta"] >= 0:
+                                        continue
+                                    _, _dpr_s_p1_score, _ = _is_push_candle_short(_dpr_s_p1c, avg_vol)
+                                    if _dpr_s_p1_score >= 2:
+                                        _dpr_s_p1_found = (_dpr_s_p1i, _dpr_s_p1_score)
+                                        break
+
+                                _dpr_s_cum5 = sum(candles[k]["delta"] for k in range(max(0, i - 5), i))
+                                _dpr_s_neg5 = sum(1 for k in range(max(0, i - 5), i) if candles[k]["delta"] > 0)
+                                _dpr_s_is_single = push2_score_s >= 5 and _dpr_s_cum5 > 10000 and _dpr_s_neg5 >= 3
+                                _dpr_s_is_extended = _dpr_s_p1_found is not None
+
+                                _dpr_s_abs_atr = _compute_atr(candles, max(0, i - 2))
+                                _dpr_s_abs_score, _dpr_s_abs_reasons = _detect_buyer_absorption(candles, i, _dpr_s_abs_atr)
+                                _dpr_s_has_aggr = c.get("has_dr_l_dr", False) or c.get("local_dr", 0) >= 3
+                                _dpr_s_has_quality = _dpr_s_abs_score >= 3 or _dpr_s_has_aggr
+
+                                _dpr_s_path_a = entry_depth_s >= 0.25 and _dpr_s_has_quality and (_dpr_s_is_extended or _dpr_s_is_single)
+                                _dpr_s_path_b = (entry_depth_s >= 0.15 and _dpr_s_has_quality
+                                                 and _dpr_s_p1_found is not None and _dpr_s_p1_found[1] >= 4)
+
+                                if _dpr_s_path_a or _dpr_s_path_b:
+                                    entry = _get_ref_price(c)
+                                    _dpr_s_recent_high = max(candles[k]["high"] for k in range(max(0, i - 5), i + 1))
+                                    _dpr_s_pre_high = candles[max(0, i - 6)]["high"]
+                                    stop = max(_dpr_s_recent_high, _dpr_s_pre_high) + atr * 0.1
+                                    R = stop - entry
+
+                                    if R > atr * 0.1 and R <= atr * 2.5:
+                                        target = entry - R * TARGET_R
+                                        current_vwap = vwap[i]
+
+                                        if not (current_vwap < entry and target < current_vwap):
+                                            _dpr_s_init = push2_score_s + (_dpr_s_p1_found[1] // 2 if _dpr_s_p1_found else 0)
+                                            _dpr_s_total = _dpr_s_init + _dpr_s_abs_score
+                                            if _dpr_s_total >= 9:
+                                                grade = "A"
+                                            elif _dpr_s_total >= 7:
+                                                grade = "B+"
+                                            else:
+                                                grade = "B"
+
+                                            signals.append({
+                                                "side": "SHORT",
+                                                "candle_idx": i,
+                                                "push1_idx": _dpr_s_p1_found[0] if _dpr_s_p1_found else i,
+                                                "time": c.get("time", ""),
+                                                "entry": entry,
+                                                "stop": stop,
+                                                "target": target,
+                                                "R": R,
+                                                "score": _dpr_s_total,
+                                                "grade": grade,
+                                                "initiative_score": _dpr_s_init,
+                                                "abs_score": _dpr_s_abs_score,
+                                                "push1_score": _dpr_s_p1_found[1] if _dpr_s_p1_found else 0,
+                                                "push2_score": push2_score_s,
+                                                "reasons": _dpr_s_abs_reasons,
+                                                "vwap": current_vwap,
+                                                "vwap_support": current_vwap > entry,
+                                                "push_rvol": c.get("rvol", 1.0),
+                                                "push_dg": 0,
+                                                "push_dr": c.get("local_dr", 0),
+                                                "push_delta": c["delta"],
+                                                "signal_type": "double_push",
+                                            })
+
+        # === SHORT cascade disabled (negative expectancy: 6 trades, 33% WR, -1.2R over 260 days) ===
+        if False and not (is_push2_short and push2_score_s >= 3):
             is_cascade_s, cascade_score_s, cascade_reasons_s = _detect_multi_bar_cascade_short(candles, i)
             if is_cascade_s:
                 atr = _compute_atr(candles, i)
@@ -1602,7 +1856,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                                 dom_cum_bid = sum(candles[k].get("bid_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
                                                 dom_cum_ask = sum(candles[k].get("ask_dom_levels", 0) for k in range(max(0, i - 2), i + 1))
                                                 dom_cum_net = dom_cum_bid - dom_cum_ask
-                                                if dom_single_net > 0 or dom_cum_net > 0:
+                                                # Buyer absorption counter-signal
+                                                _cr_spread = c["high"] - c["low"]
+                                                _cr_absorbed = False
+                                                if _cr_spread > 0:
+                                                    _cr_close_pos = (c["close"] - c["low"]) / _cr_spread
+                                                    if _cr_close_pos > 0.6 and c.get("bid_dom_levels", 0) >= 4:
+                                                        _cr_absorbed = True
+                                                if (dom_single_net > 0 or dom_cum_net > 0) and not _cr_absorbed:
                                                     signals.append({
                                                         "side": "SHORT",
                                                         "candle_idx": i,
@@ -1941,6 +2202,8 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                             continue
                         if risk > 40:
                             continue
+                        if c.get("local_dg", 0) < 3 and not c.get("has_dg_l_dg", False):
+                            continue
                         if score < 9 and risk > atr * MAX_STOP_ATR:
                             continue
                         if vwap[i] > entry and target > vwap[i]:
@@ -2031,6 +2294,8 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                         if score <= 7:
                             continue
                         if risk > 40:
+                            continue
+                        if c.get("local_dr", 0) < 3 and not c.get("has_dr_l_dr", False):
                             continue
                         if score < 9 and risk > atr * MAX_STOP_ATR:
                             continue
@@ -2125,6 +2390,14 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             _g2_recent_move = (candles[i]["close"] - _g2_prev_close) / _g2_atr
             if _g2_recent_move < -1.5:
                 continue
+
+        # Delta divergence grade boost: upgrade when 3-bar cum_delta opposes signal
+        _cum_delta_3 = sum(candles[k]["delta"] for k in range(max(0, i - 2), i + 1))
+        _has_divergence = ((_g2_side == "SHORT" and _cum_delta_3 > 10000) or
+                           (_g2_side == "LONG" and _cum_delta_3 < -10000))
+        if _has_divergence:
+            _grade_map = {"B": "B+", "B+": "A", "A": "A+"}
+            sig["grade"] = _grade_map.get(sig["grade"], sig["grade"])
 
         context_filtered.append(sig)
 
