@@ -79,6 +79,7 @@ def run_day_offline(date_str):
             "floor_bounce": "FB", "dom_sweep_breakout": "DS",
             "vwap_rejection": "VR", "vwap_pullback": "VP",
             "trap_rejection": "TR", "cascade": "C",
+            "v_bounce": "VB", "trend_pullback": "TP",
         }
         sig_type = sig_type_map.get(sig.get("signal_type", ""), "??")
 

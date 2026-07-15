@@ -1644,6 +1644,116 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
 
         # === LONG cascade intentionally omitted (negative expectancy in backtest) ===
 
+        # === TRY V-BOUNCE LONG ===
+        # Session low swept + strong close recovery (close in upper 70%+ of bar) + bar range >= 1 ATR
+        if not any(s["candle_idx"] == i and s["side"] == "LONG" for s in signals):
+            _vb_atr = _compute_atr(candles, i)
+            if _vb_atr > 0 and i >= 7:
+                _vb_bar_range = c["high"] - c["low"]
+                if _vb_bar_range > 0 and _vb_bar_range >= _vb_atr * 1.0:
+                    _vb_session_high = max(candles[k]["high"] for k in range(0, i))
+                    _vb_session_low = min(candles[k]["low"] for k in range(0, i))
+                    _vb_session_range = _vb_session_high - _vb_session_low
+                    if _vb_session_range >= _vb_atr * 1.5 and c["low"] < _vb_session_low:
+                        _vb_sweep = (_vb_session_low - c["low"]) / _vb_atr
+                        _vb_close_pos = (c["close"] - c["low"]) / _vb_bar_range
+                        if _vb_close_pos >= 0.7 and _vb_sweep >= 0.1:
+                            _vb_entry = _get_ref_price(c)
+                            _vb_stop = c["low"] - _vb_atr * 0.1
+                            _vb_R = _vb_entry - _vb_stop
+                            if _vb_R > _vb_atr * 0.15 and _vb_R <= _vb_atr * 2.5:
+                                _vb_target = _vb_entry + _vb_R * TARGET_R
+                                _vb_vwap = vwap[i]
+                                _vb_score = 7
+                                if _vb_close_pos >= 0.8:
+                                    _vb_score += 1
+                                if _vb_sweep >= 0.2:
+                                    _vb_score += 1
+                                if c["delta"] > 0:
+                                    _vb_score += 1
+                                if c.get("local_dg", 0) >= 2:
+                                    _vb_score += 1
+                                _vb_grade = "A" if _vb_score >= 10 else "B+" if _vb_score >= 8 else "B"
+                                signals.append({
+                                    "side": "LONG",
+                                    "candle_idx": i,
+                                    "push1_idx": i,
+                                    "time": c.get("time", ""),
+                                    "entry": _vb_entry,
+                                    "stop": _vb_stop,
+                                    "target": _vb_target,
+                                    "R": _vb_R,
+                                    "score": _vb_score,
+                                    "grade": _vb_grade,
+                                    "initiative_score": _vb_score,
+                                    "abs_score": 0,
+                                    "push1_score": 0,
+                                    "push2_score": 0,
+                                    "reasons": [f"v_bounce", f"sweep={_vb_sweep:.2f}", f"cp={_vb_close_pos:.2f}"],
+                                    "vwap": _vb_vwap,
+                                    "vwap_support": _vb_vwap < _vb_entry,
+                                    "push_rvol": c.get("rvol", 1.0),
+                                    "push_dg": c.get("local_dg", 0),
+                                    "push_dr": 0,
+                                    "push_delta": c["delta"],
+                                    "signal_type": "v_bounce",
+                                })
+
+        # === TRY V-BOUNCE SHORT ===
+        # Session high swept + strong close rejection (close in lower 70%+ of bar) + bar range >= 1 ATR
+        if not any(s["candle_idx"] == i and s["side"] == "SHORT" for s in signals):
+            _vbs_atr = _compute_atr(candles, i)
+            if _vbs_atr > 0 and i >= 7:
+                _vbs_bar_range = c["high"] - c["low"]
+                if _vbs_bar_range > 0 and _vbs_bar_range >= _vbs_atr * 1.0:
+                    _vbs_session_high = max(candles[k]["high"] for k in range(0, i))
+                    _vbs_session_low = min(candles[k]["low"] for k in range(0, i))
+                    _vbs_session_range = _vbs_session_high - _vbs_session_low
+                    if _vbs_session_range >= _vbs_atr * 1.5 and c["high"] > _vbs_session_high:
+                        _vbs_sweep = (c["high"] - _vbs_session_high) / _vbs_atr
+                        _vbs_close_pos = (c["high"] - c["close"]) / _vbs_bar_range
+                        if _vbs_close_pos >= 0.7 and _vbs_sweep >= 0.1:
+                            _vbs_entry = _get_ref_price(c)
+                            _vbs_stop = c["high"] + _vbs_atr * 0.1
+                            _vbs_R = _vbs_stop - _vbs_entry
+                            if _vbs_R > _vbs_atr * 0.15 and _vbs_R <= _vbs_atr * 2.5:
+                                _vbs_target = _vbs_entry - _vbs_R * TARGET_R
+                                _vbs_vwap = vwap[i]
+                                _vbs_score = 7
+                                if _vbs_close_pos >= 0.8:
+                                    _vbs_score += 1
+                                if _vbs_sweep >= 0.2:
+                                    _vbs_score += 1
+                                if c["delta"] < 0:
+                                    _vbs_score += 1
+                                if c.get("local_dr", 0) >= 2:
+                                    _vbs_score += 1
+                                _vbs_grade = "A" if _vbs_score >= 10 else "B+" if _vbs_score >= 8 else "B"
+                                signals.append({
+                                    "side": "SHORT",
+                                    "candle_idx": i,
+                                    "push1_idx": i,
+                                    "time": c.get("time", ""),
+                                    "entry": _vbs_entry,
+                                    "stop": _vbs_stop,
+                                    "target": _vbs_target,
+                                    "R": _vbs_R,
+                                    "score": _vbs_score,
+                                    "grade": _vbs_grade,
+                                    "initiative_score": _vbs_score,
+                                    "abs_score": 0,
+                                    "push1_score": 0,
+                                    "push2_score": 0,
+                                    "reasons": [f"v_bounce", f"sweep={_vbs_sweep:.2f}", f"cp={_vbs_close_pos:.2f}"],
+                                    "vwap": _vbs_vwap,
+                                    "vwap_support": _vbs_vwap > _vbs_entry,
+                                    "push_rvol": c.get("rvol", 1.0),
+                                    "push_dg": 0,
+                                    "push_dr": c.get("local_dr", 0),
+                                    "push_delta": c["delta"],
+                                    "signal_type": "v_bounce",
+                                })
+
 
     # === TRY DOM-BASED STRATEGIES AFTER FULL LOOP ===
     for i in range(6, n if live_mode else n - 3):
