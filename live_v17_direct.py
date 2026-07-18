@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import statistics
 from datetime import datetime, timedelta
 from reversal_algo_v17 import compute_session_features, detect_signals
+from initiative_drive import InitiativeDriveDetector
 
 
 class AlertFilter(io.TextIOBase):
@@ -65,6 +66,7 @@ class V17Runner:
         self.active_trades = []
         self.last_signal_idx = -3
         self.silent = False  # suppresses printing during initial batch load
+        self.init_detector = InitiativeDriveDetector()
 
     def on_candle(self, candle_dict):
         self.candles.append(candle_dict)
@@ -91,9 +93,29 @@ class V17Runner:
             self.active_trades.append({
                 "signal": sig, "entry_idx": n - 1,
                 "status": "ACTIVE", "bars_held": 0,
+                "source": "V17",
             })
             if not self.silent:
                 self._print_signal(sig)
+
+        # Initiative Drive: feed same candle, block if V17 has active trade
+        init_signal = self.init_detector.on_candle(candle_dict)
+        if init_signal and not self._has_active_in_direction(init_signal['side']):
+            self.signals_fired.append(init_signal)
+            self.active_trades.append({
+                "signal": init_signal, "entry_idx": n - 1,
+                "status": "ACTIVE", "bars_held": 0,
+                "source": "INIT",
+            })
+            if not self.silent:
+                self._print_init_signal(init_signal)
+
+    def _has_active_in_direction(self, side):
+        """Check if there's any active trade (V17 or Init) in the same direction."""
+        for trade in self.active_trades:
+            if trade["status"] == "ACTIVE" and trade["signal"]["side"] == side:
+                return True
+        return False
 
 
     def _update_active_trades(self):
@@ -105,41 +127,48 @@ class V17Runner:
                 continue
             trade["bars_held"] += 1
             sig = trade["signal"]
+            is_init = trade.get("source") == "INIT"
+            target_r = 1.5 if is_init else 1.2
+            max_bars = 13 if is_init else (25 if sig.get("signal_type") == "vwap_pullback" else 15)
 
             if sig["side"] == "LONG":
                 if c["low"] <= sig["stop"]:
                     trade["status"] = "STOPPED"
                     trade["r_pnl"] = -1.0
                     if not self.silent:
-                        self._print_exit(sig, "STOP HIT", -1.0)
+                        self._print_exit(sig, "STOP HIT", -1.0, is_init)
                 elif c["high"] >= sig["target"]:
                     trade["status"] = "TARGET"
-                    trade["r_pnl"] = 1.2
+                    trade["r_pnl"] = target_r
                     if not self.silent:
-                        self._print_exit(sig, "TARGET HIT", 1.2)
-                elif trade["bars_held"] >= (25 if sig.get("signal_type") == "vwap_pullback" else 15):
+                        self._print_exit(sig, "TARGET HIT", target_r, is_init)
+                elif trade["bars_held"] >= max_bars:
                     r_pnl = (c["close"] - sig["entry"]) / sig["R"] if sig["R"] > 0 else 0
                     trade["status"] = "TIMEOUT"
                     trade["r_pnl"] = r_pnl
                     if not self.silent:
-                        self._print_exit(sig, "TIMEOUT", r_pnl)
+                        self._print_exit(sig, "TIMEOUT", r_pnl, is_init)
             else:
                 if c["high"] >= sig["stop"]:
                     trade["status"] = "STOPPED"
                     trade["r_pnl"] = -1.0
                     if not self.silent:
-                        self._print_exit(sig, "STOP HIT", -1.0)
+                        self._print_exit(sig, "STOP HIT", -1.0, is_init)
                 elif c["low"] <= sig["target"]:
                     trade["status"] = "TARGET"
-                    trade["r_pnl"] = 1.2
+                    trade["r_pnl"] = target_r
                     if not self.silent:
-                        self._print_exit(sig, "TARGET HIT", 1.2)
-                elif trade["bars_held"] >= (25 if sig.get("signal_type") == "vwap_pullback" else 15):
+                        self._print_exit(sig, "TARGET HIT", target_r, is_init)
+                elif trade["bars_held"] >= max_bars:
                     r_pnl = (sig["entry"] - c["close"]) / sig["R"] if sig["R"] > 0 else 0
                     trade["status"] = "TIMEOUT"
                     trade["r_pnl"] = r_pnl
                     if not self.silent:
-                        self._print_exit(sig, "TIMEOUT", r_pnl)
+                        self._print_exit(sig, "TIMEOUT", r_pnl, is_init)
+
+            # Sync Init detector state when its trade closes
+            if is_init and trade["status"] != "ACTIVE":
+                self.init_detector.active_trade = None
 
     def _print_signal(self, sig):
         _st = sig.get("signal_type", "")
@@ -161,39 +190,65 @@ class V17Runner:
         print("=" * 70 + "\n")
         sys.stdout.flush()
 
-    def _print_exit(self, sig, reason, r_pnl):
+    def _print_init_signal(self, sig):
+        print("\n" + "-" * 70)
+        print(f"  >>> INIT-DRIVE: {sig['side']} | Explosive@{sig['time']} -> Entry@{sig['entry_time']} <<<")
+        print(f"  Entry: {sig['entry']:.2f}")
+        print(f"  Stop:  {sig['stop']:.2f}")
+        print(f"  Target: {sig['target']:.2f}")
+        print(f"  R: {sig['R']:.1f} pts | RR: 1.5:1")
+        print(f"  Body: {sig['body_pct']:.0%} | PB close: {sig['pb_close_pos']:.2f} | PB bars: {sig['pb_bars']}")
+        print("-" * 70 + "\n")
+        sys.stdout.flush()
+
+    def _print_exit(self, sig, reason, r_pnl, is_init=False):
         color = "\033[92m" if r_pnl > 0 else "\033[91m"
         reset = "\033[0m"
-        print(f"\n  {color}>>> {sig['side']} {sig['time']} -> {reason} ({r_pnl:+.2f}R){reset}")
+        src = "INIT" if is_init else "V17"
+        print(f"\n  {color}>>> [{src}] {sig['side']} {sig['time']} -> {reason} ({r_pnl:+.2f}R){reset}")
         sys.stdout.flush()
 
     def print_summary(self):
         print("\n" + "=" * 70)
-        print(f"  V17 SESSION SUMMARY")
+        print(f"  SESSION SUMMARY (V17 + Initiative Drive)")
         print(f"  Candles processed: {len(self.candles)}")
-        print(f"  Signals fired: {len(self.signals_fired)}")
-        if self.signals_fired:
-            longs = sum(1 for s in self.signals_fired if s['side'] == 'LONG')
-            shorts = sum(1 for s in self.signals_fired if s['side'] == 'SHORT')
-            cascades = sum(1 for s in self.signals_fired if s.get('signal_type') == 'cascade')
-            print(f"  LONG: {longs} | SHORT: {shorts} (Cascade: {cascades})")
-            print(f"\n  All signals:")
-            for sig in self.signals_fired:
+
+        v17_sigs = [s for s in self.signals_fired if s.get('signal_type') != 'initiative_drive']
+        init_sigs = [s for s in self.signals_fired if s.get('signal_type') == 'initiative_drive']
+
+        print(f"  V17 signals: {len(v17_sigs)} | Initiative Drive: {len(init_sigs)}")
+
+        if v17_sigs:
+            longs = sum(1 for s in v17_sigs if s['side'] == 'LONG')
+            shorts = len(v17_sigs) - longs
+            print(f"\n  V17: LONG={longs} SHORT={shorts}")
+            for sig in v17_sigs:
                 sig_type = {"cascade": "C", "failed_breakout": "FB", "ceiling_rejection": "CR",
                             "floor_bounce": "FB", "floor_rejection": "FR",
                             "vwap_pullback": "VP", "vwap_rejection": "VR",
                             "iceberg_squeeze": "IS", "dom_sweep_breakout": "DS",
                             "trap_rejection": "TR"}.get(sig.get("signal_type", ""), "DP")
-                print(f"    {sig['time']} {sig['side']:5s} {sig['grade']} "
-                      f"Score={sig['score']:2d} Entry={sig['entry']:.2f} "
+                print(f"    {sig['time']} {sig['side']:5s} {sig.get('grade', '-')} "
+                      f"Score={sig.get('score', 0):2d} Entry={sig['entry']:.2f} "
                       f"Stop={sig['stop']:.2f} Tgt={sig['target']:.2f} [{sig_type}]")
+
+        if init_sigs:
+            longs = sum(1 for s in init_sigs if s['side'] == 'LONG')
+            shorts = len(init_sigs) - longs
+            print(f"\n  INIT-DRIVE: LONG={longs} SHORT={shorts}")
+            for sig in init_sigs:
+                print(f"    {sig['time']} exp -> {sig.get('entry_time', '?')} entry | "
+                      f"{sig['side']:5s} Entry={sig['entry']:.2f} "
+                      f"Stop={sig['stop']:.2f} Tgt={sig['target']:.2f}")
+
         completed = [t for t in self.active_trades if t["status"] != "ACTIVE"]
         if completed:
             total_r = sum(t.get("r_pnl", 0) for t in completed)
             print(f"\n  Completed trades: {len(completed)} | Total: {total_r:+.1f}R")
             for t in completed:
                 sig = t["signal"]
-                print(f"    {sig['time']} {sig['side']:5s} -> {t['status']} ({t.get('r_pnl', 0):+.2f}R)")
+                src = "[INIT]" if t.get("source") == "INIT" else "[V17] "
+                print(f"    {src} {sig['time']} {sig['side']:5s} -> {t['status']} ({t.get('r_pnl', 0):+.2f}R)")
         print("=" * 70)
 
 
@@ -524,10 +579,11 @@ def main():
 
     # === MAIN LOOP ===
     print("=" * 70)
-    print(f"  V17 LIVE MODE - {target_date}")
+    print(f"  V17 + INITIATIVE DRIVE LIVE - {target_date}")
     print(f"  Cycle-based polling (aligned to 5-min candle close)")
-    print(f"  Signals: Double-Push (LONG/SHORT) + Cascade (SHORT)")
-    print(f"  Filters: SHORT DOM (cumulative 3-bar net)")
+    print(f"  V17: Double-Push + Cascade + CR + FB + VP + TR + IS + DS")
+    print(f"  INIT: Explosive bar + DR/DG pocket + pullback (1.5R)")
+    print(f"  Position guard: one direction at a time")
     print("=" * 70)
 
     token = fp.get_fresh_token()
