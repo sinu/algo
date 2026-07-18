@@ -1948,6 +1948,11 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
                                             if _is_vwap_rejection and total_score < 9 and R > 25:
                                                 continue
 
+                                            # ANTI-GRIND FILTER: Block trades > 3 ATR above VWAP with low volume (no selling climax, just drift)
+                                            _vwap_dist_atr = (c["high"] - current_vwap) / atr if atr > 0 else 0
+                                            if _vwap_dist_atr > 3.0 and c.get("rvol", 1.0) < 0.60:
+                                                continue
+
                                             # Trend filter: block low-score CR on strong trend-up days
                                             _cr_trend_blocked = False
                                             if total_score < 7 and i < 15:
@@ -2499,6 +2504,76 @@ def detect_signals(candles, feats, min_score=7, live_mode=False):
             _g2_prev_close = candles[max(0, i - 4)]["close"]
             _g2_recent_move = (candles[i]["close"] - _g2_prev_close) / _g2_atr
             if _g2_recent_move < -1.5:
+                continue
+
+        # 5. Close_pos filter: block weak-close signal bars (buyer/seller couldn't hold)
+        _g2_c = candles[i]
+        _g2_bar_range = _g2_c["high"] - _g2_c["low"]
+        _g2_close_pos = (_g2_c["close"] - _g2_c["low"]) / _g2_bar_range if _g2_bar_range > 0 else 0.5
+        if _g2_side == "LONG" and _g2_close_pos < 0.3 and _g2_type not in ("v_bounce", "floor_bounce"):
+            continue
+        if _g2_side == "SHORT" and _g2_type == "double_push" and _g2_close_pos > 0.75:
+            continue
+
+        # 6. CR at mid-range with low volume: not a genuine session-high rejection
+        if _g2_type == "ceiling_rejection":
+            _g2_eh = sig.get("entry", 0)
+            _g2_sl = min(candles[k]["low"] for k in range(0, max(1, i)))
+            _g2_sh = max(candles[k]["high"] for k in range(0, max(1, i)))
+            _g2_sr = _g2_sh - _g2_sl
+            _g2_entry_ht = (_g2_eh - _g2_sl) / _g2_sr if _g2_sr > 0 else 0.5
+            if _g2_entry_ht < 0.55 and _g2_c.get("rvol", 1.0) < 0.5:
+                continue
+
+        # 6b. CR SHORT slow-grind: far above VWAP with dead volume = no climax, just drift
+        if _g2_type == "ceiling_rejection" and _g2_side == "SHORT":
+            _g2_vwap = candles[i].get("vwap", 0)
+            if _g2_vwap > 0 and _g2_atr > 0:
+                _g2_vwap_dist = (candles[i]["high"] - _g2_vwap) / _g2_atr
+                if _g2_vwap_dist > 3.0 and _g2_c.get("rvol", 1.0) < 0.60:
+                    continue
+
+        # 7. TR in tight-range session: no room for reversal to develop
+        if _g2_type == "trap_rejection":
+            _g2_sh_tr = max(candles[k]["high"] for k in range(0, i + 1))
+            _g2_sl_tr = min(candles[k]["low"] for k in range(0, i + 1))
+            _g2_sr_tr = (_g2_sh_tr - _g2_sl_tr) / _g2_atr if _g2_atr > 0 else 5.0
+            if _g2_sr_tr < 6.0:
+                continue
+
+        # 8. TP trend exhaustion: session delta already extreme, pullback won't continue
+        if _g2_type == "trend_pullback":
+            _g2_cum_sess = sum(candles[k]["delta"] for k in range(0, i + 1))
+            if abs(_g2_cum_sess) > 700000:
+                continue
+
+        # 9. DP wide stop in extended session: risk too large relative to exhausted range
+        if _g2_type == "double_push":
+            if _g2_risk >= 45:
+                _g2_sh_dp = max(candles[k]["high"] for k in range(0, i + 1))
+                _g2_sl_dp = min(candles[k]["low"] for k in range(0, i + 1))
+                _g2_sr_dp = (_g2_sh_dp - _g2_sl_dp) / _g2_atr if _g2_atr > 0 else 5.0
+                if _g2_sr_dp > 8.0:
+                    continue
+
+        # 10. VB wide stop without climax volume: bounce on large bar needs extreme volume
+        if _g2_type == "v_bounce":
+            _g2_r_atr = _g2_risk / _g2_atr if _g2_atr > 0 else 0
+            if _g2_r_atr >= 1.0 and _g2_c.get("rvol", 1.0) < 2.0:
+                continue
+
+        # 11. DP SHORT: signal bar close recovered + entry low in session range
+        if _g2_type == "double_push" and _g2_side == "SHORT":
+            _g2_sl_11 = min(candles[k]["low"] for k in range(0, max(1, i)))
+            _g2_sh_11 = max(candles[k]["high"] for k in range(0, i + 1))
+            _g2_sr_11 = _g2_sh_11 - _g2_sl_11
+            _g2_eh_11 = (sig["entry"] - _g2_sl_11) / _g2_sr_11 if _g2_sr_11 > 0 else 0.5
+            if _g2_close_pos >= 0.5 and _g2_eh_11 < 0.4:
+                continue
+
+        # 12. DP SHORT: green signal bar with wide stop = sellers lost the bar + large risk
+        if _g2_type == "double_push" and _g2_side == "SHORT":
+            if _g2_c["close"] >= _g2_c["open"] and _g2_risk / _g2_atr >= 0.8:
                 continue
 
         # Delta divergence grade boost: upgrade when 3-bar cum_delta opposes signal
